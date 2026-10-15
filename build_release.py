@@ -11,6 +11,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# เครื่อง Windows (เช่น GitHub Actions) ใช้ cp1252 เป็นค่าเริ่มต้น พิมพ์ภาษาไทยแล้วจะ error → บังคับเป็น UTF-8
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+os.environ.setdefault("PYTHONUTF8", "1")
+
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
