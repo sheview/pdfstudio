@@ -1,0 +1,33 @@
+name: Build PDF Studio installer
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt pyinstaller
+          python make_icon.py
+      - name: Build exe
+        shell: cmd
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name "PDF Studio"
+          --icon assets\icon.ico --add-data "assets;assets"
+          --collect-all qtawesome --collect-all pymupdf
+          --exclude-module tkinter --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtQml
+          --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtMultimedia
+          main.py
+      - name: Build Setup.exe (Inno Setup)
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFStudio_Setup
+          path: installer/PDFStudio_Setup.exe
