@@ -25,8 +25,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import ops
 from .config import APP_NAME, COPYRIGHT, MAX_RECENT, SETTINGS_APP, SETTINGS_ORG
-from .dialogs import MergeDialog, ask_password, show_about
+from .dialogs import MergeDialog, PasswordDialog, ask_password, show_about
 from .doctab import DocTab
 from .icons import icon
 from .model import PdfModel
@@ -163,6 +164,8 @@ class MainWindow(QMainWindow):
         self.act_obj_delete = self._act("ลบ", "delete-outline", T("delete_object"), None, "ลบรูป/กล่องข้อความที่เลือก  (Delete)")
         self.act_obj_front = self._act("นำมาไว้หน้าสุด", "arrange-bring-to-front", lambda: self._tab_call("reorder_object")(True), None, "นำวัตถุที่เลือกมาไว้ด้านหน้าสุด")
         self.act_obj_back = self._act("ส่งไปหลังสุด", "arrange-send-to-back", lambda: self._tab_call("reorder_object")(False), None, "ส่งวัตถุที่เลือกไปไว้ด้านหลังสุด")
+        self.act_protect = self._act("ตั้งรหัสผ่าน", "lock-outline", self.protect, None,
+                                     "ตั้งรหัสผ่านเปิดไฟล์ (เข้ารหัส AES-256) ให้เอกสารนี้หรือหลายไฟล์", doc=False)
         self.act_watermark = self._act("ลายน้ำ", "water-opacity", T("add_watermark"), None, "ใส่ลายน้ำข้อความหรือรูปภาพ (ทุกหน้า/บางหน้า)")
         self.act_obj_edit = self._act("แก้ไข", "pencil-outline", T("edit_object"), "F2", "แก้ไขข้อความของกล่องข้อความที่เลือก (ดับเบิลคลิกก็ได้)")
         self.act_select_all = self._act("เลือกทั้งหน้า", "select-all", self.select_all, "Ctrl+A", "เลือกข้อความทั้งหน้า")
@@ -223,6 +226,7 @@ class MainWindow(QMainWindow):
             ("ไฟล์", [A.act_open, A.act_save, A.act_save_as, A.act_close]),
             ("พิมพ์", [A.act_print, A.act_preview]),
             ("รวม", [A.act_merge]),
+            ("ความปลอดภัย", [A.act_protect]),
             ("ประวัติ", [A.act_undo, A.act_redo]),
             ("มุมมอง", [A.act_zoom_in, A.act_zoom_out, A.act_fit_width, A.act_fit_page, A.act_find, A.act_thumbs]),
         ])
@@ -443,6 +447,47 @@ class MainWindow(QMainWindow):
             self.show_message(f"รวมไฟล์สำเร็จ ({dlg.result_pages} หน้า): {dlg.result_path}")
             if dlg.chk_open.isChecked():
                 self.open_files([dlg.result_path])
+
+    def protect(self) -> None:
+        t = self.current_tab()
+        dlg = PasswordDialog(self, t is not None, t.model.title if t else "", self.start_dir())
+        if dlg.exec() != PasswordDialog.DialogCode.Accepted:
+            return
+        kw = dlg.values()
+        try:
+            if not dlg.many and t is not None:
+                base = Path(t.model.path).stem if t.model.path else "เอกสาร"
+                folder = str(Path(t.model.path).parent) if t.model.path else self.start_dir()
+                out, _ = QFileDialog.getSaveFileName(self, "บันทึกไฟล์ที่ตั้งรหัสผ่าน",
+                                                     str(Path(folder) / f"{base}_protected.pdf"), "PDF (*.pdf)")
+                if not out:
+                    return
+                if not out.lower().endswith(".pdf"):
+                    out += ".pdf"
+                with t.model.baked() as d:
+                    ops.save_protected(d, out, **kw)
+                self.remember_dir(out)
+                self.show_message(f"บันทึกไฟล์ที่มีรหัสผ่านแล้ว: {out}")
+                QMessageBox.information(self, "ตั้งรหัสผ่านสำเร็จ",
+                                        f"บันทึกแล้ว:\n{out}\n\nไฟล์เปิดอยู่ในโปรแกรมยังเป็นฉบับไม่มีรหัสผ่าน — แจกไฟล์ที่ลงท้าย _protected ให้พนักงาน")
+                return
+            folder = QFileDialog.getExistingDirectory(self, "เลือกโฟลเดอร์สำหรับไฟล์ที่ตั้งรหัสผ่านแล้ว", self.start_dir())
+            if not folder:
+                return
+            ok, bad = 0, []
+            for f in dlg.files:
+                try:
+                    ops.protect_file(f, Path(folder) / f"{Path(f).stem}_protected.pdf", **kw)
+                    ok += 1
+                except PermissionError:
+                    bad.append(f"{Path(f).name} — มีรหัสผ่านอยู่แล้ว (เปิดในโปรแกรมด้วยรหัสเดิมแล้ว 'ตั้งรหัสผ่าน' ใหม่)")
+                except Exception as e:
+                    bad.append(f"{Path(f).name} — {e}")
+            msg = f"ตั้งรหัสผ่านสำเร็จ {ok} ไฟล์ ที่ {folder}"
+            self.show_message(msg)
+            QMessageBox.information(self, "ตั้งรหัสผ่านเสร็จแล้ว", msg + (("\n\nไม่สำเร็จ:\n" + "\n".join(bad)) if bad else ""))
+        except Exception as e:
+            QMessageBox.critical(self, "ตั้งรหัสผ่านไม่สำเร็จ", str(e))
 
     # ───────────────────────── คำสั่งทั่วไป ─────────────────────────
     def undo(self) -> None:

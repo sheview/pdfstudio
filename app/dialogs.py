@@ -852,6 +852,148 @@ class WatermarkDialog(QDialog):
         super().accept()
 
 
+# ───────────────────────── ตั้งรหัสผ่านเอกสาร ─────────────────────────
+class PasswordDialog(QDialog):
+    """ตั้งรหัสผ่านเปิดไฟล์ (AES-256) ให้เอกสารที่เปิดอยู่ หรือหลายไฟล์พร้อมกัน"""
+
+    def __init__(self, parent, has_doc: bool, doc_name: str = "", start_dir: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("ตั้งรหัสผ่านเอกสาร")
+        self.setMinimumWidth(560)
+        self._dir = start_dir
+        self.files: list[str] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(12)
+        lay.addWidget(_title("ตั้งรหัสผ่านเอกสาร", "ผู้ที่ไม่มีรหัสผ่านจะเปิดไฟล์ไม่ได้ — เข้ารหัสแบบ AES-256 และบันทึกเป็นไฟล์ใหม่ (ไฟล์ต้นฉบับไม่ถูกแก้)"))
+
+        self.r_doc = QRadioButton(f"เอกสารที่เปิดอยู่ ({doc_name})" if has_doc else "เอกสารที่เปิดอยู่")
+        self.r_many = QRadioButton("เลือกไฟล์ PDF หลายไฟล์จากเครื่อง")
+        self.r_doc.setEnabled(has_doc)
+        (self.r_doc if has_doc else self.r_many).setChecked(True)
+        lay.addWidget(self.r_doc)
+        lay.addWidget(self.r_many)
+
+        self.box_files = QWidget()
+        fv = QVBoxLayout(self.box_files)
+        fv.setContentsMargins(24, 0, 0, 0)
+        self.list = QTreeWidget()
+        self.list.setHeaderHidden(True)
+        self.list.setRootIsDecorated(False)
+        self.list.setMinimumHeight(110)
+        fv.addWidget(self.list)
+        frow = QHBoxLayout()
+        b_add = QPushButton("  เพิ่มไฟล์…")
+        b_add.setIcon(icon("file-plus-outline"))
+        b_add.clicked.connect(self._add_files)
+        b_del = QPushButton("เอาออก")
+        b_del.clicked.connect(self._remove_files)
+        frow.addWidget(b_add)
+        frow.addWidget(b_del)
+        frow.addStretch(1)
+        fv.addLayout(frow)
+        lay.addWidget(self.box_files)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        self.pw1 = QLineEdit()
+        self.pw1.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pw1.setPlaceholderText("รหัสผ่านสำหรับเปิดไฟล์ (อย่างน้อย 4 ตัวอักษร)")
+        self.pw2 = QLineEdit()
+        self.pw2.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pw2.setPlaceholderText("พิมพ์รหัสผ่านอีกครั้งเพื่อยืนยัน")
+        self.show_pw = QCheckBox("แสดงรหัสผ่าน")
+        self.show_pw.toggled.connect(self._toggle_echo)
+        form.addRow("รหัสผ่าน", self.pw1)
+        form.addRow("ยืนยัน", self.pw2)
+        form.addRow("", self.show_pw)
+        lay.addLayout(form)
+
+        self.perm_box = QWidget()
+        pv = QVBoxLayout(self.perm_box)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(6)
+        cap = QLabel("จำกัดสิทธิ์ผู้เปิดไฟล์ (ไม่บังคับ)")
+        cap.setStyleSheet(f"color:{MUTED};font-weight:600;")
+        pv.addWidget(cap)
+        prow = QHBoxLayout()
+        self.c_print = QCheckBox("ห้ามพิมพ์")
+        self.c_copy = QCheckBox("ห้ามคัดลอกข้อความ")
+        self.c_edit = QCheckBox("ห้ามแก้ไข")
+        for c in (self.c_print, self.c_copy, self.c_edit):
+            c.toggled.connect(self._perm_changed)
+            prow.addWidget(c)
+        prow.addStretch(1)
+        pv.addLayout(prow)
+        self.owner = QLineEdit()
+        self.owner.setEchoMode(QLineEdit.EchoMode.Password)
+        self.owner.setPlaceholderText("รหัสผู้ดูแล — ใช้ปลดข้อจำกัด (ต้องไม่ซ้ำรหัสผ่านเปิดไฟล์)")
+        self.owner.setEnabled(False)
+        pv.addWidget(self.owner)
+        note = QLabel("ข้อจำกัดสิทธิ์เป็นเพียงข้อตกลงที่โปรแกรมอ่าน PDF ส่วนใหญ่ปฏิบัติตาม แต่บางโปรแกรมอาจไม่เคารพ "
+                      "— ส่วนรหัสผ่านเปิดไฟล์ป้องกันได้จริง\nโปรดจดรหัสผ่านไว้ หากลืมจะกู้คืนไฟล์ไม่ได้")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{MUTED};font-size:9pt;")
+        pv.addWidget(note)
+        lay.addWidget(self.perm_box)
+        lay.addWidget(_buttons(self, "ตั้งรหัสผ่าน"))
+        self.r_many.toggled.connect(self._mode)
+        self._mode()
+
+    def _mode(self) -> None:
+        self.box_files.setVisible(self.r_many.isChecked())
+        self.adjustSize()
+
+    def _toggle_echo(self, on: bool) -> None:
+        m = QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+        for e in (self.pw1, self.pw2, self.owner):
+            e.setEchoMode(m)
+
+    def _perm_changed(self) -> None:
+        self.owner.setEnabled(self.c_print.isChecked() or self.c_copy.isChecked() or self.c_edit.isChecked())
+
+    def _add_files(self) -> None:
+        fs, _ = QFileDialog.getOpenFileNames(self, "เลือกไฟล์ PDF", self._dir, "PDF (*.pdf)")
+        for f in fs:
+            if f not in self.files:
+                self.files.append(f)
+                self.list.addTopLevelItem(QTreeWidgetItem([f]))
+            self._dir = str(Path(f).parent)
+
+    def _remove_files(self) -> None:
+        for it in self.list.selectedItems():
+            self.files.remove(it.text(0))
+            self.list.takeTopLevelItem(self.list.indexOfTopLevelItem(it))
+
+    @property
+    def many(self) -> bool:
+        return self.r_many.isChecked()
+
+    def values(self) -> dict:
+        return dict(user_pw=self.pw1.text(), owner_pw=self.owner.text() if self.owner.isEnabled() else "",
+                    no_print=self.c_print.isChecked(), no_copy=self.c_copy.isChecked(), no_edit=self.c_edit.isChecked())
+
+    def accept(self) -> None:
+        pw = self.pw1.text()
+        if len(pw) < 4:
+            QMessageBox.warning(self, "รหัสผ่าน", "รหัสผ่านต้องยาวอย่างน้อย 4 ตัวอักษร")
+            return
+        if pw != self.pw2.text():
+            QMessageBox.warning(self, "รหัสผ่าน", "รหัสผ่านทั้งสองช่องไม่ตรงกัน")
+            return
+        if self.owner.isEnabled():
+            if not self.owner.text():
+                QMessageBox.warning(self, "รหัสผู้ดูแล", "เมื่อจำกัดสิทธิ์ ต้องตั้งรหัสผู้ดูแลด้วย")
+                return
+            if self.owner.text() == pw:
+                QMessageBox.warning(self, "รหัสผู้ดูแล", "รหัสผู้ดูแลต้องไม่ซ้ำกับรหัสผ่านเปิดไฟล์")
+                return
+        if self.many and not self.files:
+            QMessageBox.warning(self, "ตั้งรหัสผ่าน", "ยังไม่ได้เลือกไฟล์")
+            return
+        super().accept()
+
+
 def show_about(parent) -> None:
     QMessageBox.about(
         parent,

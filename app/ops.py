@@ -108,6 +108,55 @@ def open_any(path: str | os.PathLike, password: str | None = None) -> pymupdf.Do
     return doc
 
 
+# ───────────────────────── ตั้งรหัสผ่านเอกสาร ─────────────────────────
+def build_permissions(no_print: bool = False, no_copy: bool = False, no_edit: bool = False) -> int:
+    """สร้างบิตสิทธิ์ของผู้เปิดไฟล์ (ด้วยรหัสผู้ใช้) — ค่าเริ่มต้นอนุญาตทุกอย่าง"""
+    perm = (pymupdf.PDF_PERM_ACCESSIBILITY | pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_PRINT_HQ
+            | pymupdf.PDF_PERM_COPY | pymupdf.PDF_PERM_MODIFY | pymupdf.PDF_PERM_ANNOTATE
+            | pymupdf.PDF_PERM_FORM | pymupdf.PDF_PERM_ASSEMBLE)
+    if no_print:
+        perm &= ~(pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_PRINT_HQ)
+    if no_copy:
+        perm &= ~pymupdf.PDF_PERM_COPY
+    if no_edit:
+        perm &= ~(pymupdf.PDF_PERM_MODIFY | pymupdf.PDF_PERM_ANNOTATE | pymupdf.PDF_PERM_FORM | pymupdf.PDF_PERM_ASSEMBLE)
+    return int(perm)
+
+
+def save_protected(doc: pymupdf.Document, out_path: str | os.PathLike, user_pw: str, owner_pw: str = "",
+                   no_print: bool = False, no_copy: bool = False, no_edit: bool = False) -> None:
+    """บันทึกสำเนาที่เข้ารหัส AES-256 — ต้องใส่ user_pw ถึงจะเปิดไฟล์ได้
+    owner_pw ใช้ปลดข้อจำกัดสิทธิ์ (ถ้าไม่ระบุแต่มีข้อจำกัด จะสร้างรหัสสุ่มให้ ซึ่งจะไม่มีใครรู้)"""
+    import secrets
+
+    if len(user_pw) < 4:
+        raise ValueError("รหัสผ่านสั้นเกินไป (อย่างน้อย 4 ตัวอักษร)")
+    restricted = no_print or no_copy or no_edit
+    owner = owner_pw or (secrets.token_urlsafe(18) if restricted else user_pw)
+    out = Path(out_path)
+    tmp = out.with_suffix(".tmp_pdfgovernix")
+    try:
+        doc.save(str(tmp), garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_AES_256,
+                 user_pw=user_pw, owner_pw=owner, permissions=build_permissions(no_print, no_copy, no_edit))
+        tmp.replace(out)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def protect_file(src: str | os.PathLike, out_path: str | os.PathLike, user_pw: str, owner_pw: str = "",
+                 no_print: bool = False, no_copy: bool = False, no_edit: bool = False) -> None:
+    """เข้ารหัสไฟล์ PDF ทั้งไฟล์ (ไฟล์ที่มีรหัสอยู่แล้วต้องเปิดด้วยรหัสเดิมก่อน → ข้ามโดยยกข้อยกเว้น)"""
+    doc = open_any(src)
+    try:
+        save_protected(doc, out_path, user_pw, owner_pw, no_print, no_copy, no_edit)
+    finally:
+        doc.close()
+
+
 # ───────────────────────── รวมไฟล์ ─────────────────────────
 @dataclass
 class MergeItem:
