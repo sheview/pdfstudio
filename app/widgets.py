@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .config import APP_NAME, COPYRIGHT
 from .icons import icon
 from .theme import ACCENT, BORDER, BORDER_STRONG, MUTED
 
@@ -97,8 +98,9 @@ class Ribbon(QWidget):
         logo = QLabel()
         logo.setPixmap(icon("file-pdf-box", ACCENT, ACCENT).pixmap(30, 30))
         top.addWidget(logo)
-        name = QLabel("PDF Studio")
+        name = QLabel("PDF <span style='font-weight:400;color:#697386'>Governix</span>")
         name.setObjectName("Logo")
+        name.setTextFormat(Qt.TextFormat.RichText)
         top.addWidget(name)
         self.tabbar = QTabBar()
         self.tabbar.setObjectName("RibbonTabs")
@@ -158,14 +160,14 @@ class OptionsBar(QWidget):
     penWidthChanged = Signal(float)
 
     HINTS = {
-        "select": "ลากเมาส์คลุมข้อความเพื่อเลือก แล้วกด Ctrl+C เพื่อคัดลอก • ดับเบิลคลิกเพื่อเลือกทีละคำ",
+        "select": "ลากคลุมข้อความเพื่อคัดลอก • คลิกรูป/กล่องข้อความเพื่อเลือก ลากย้าย ลากมุมปรับขนาด กด Delete ลบ",
         "hand": "ลากเพื่อเลื่อนหน้าเอกสาร • หมุนลูกกลิ้งเมาส์เพื่อเลื่อน • Ctrl + ลูกกลิ้ง เพื่อซูม",
         "highlight": "ลากคลุมข้อความที่ต้องการไฮไลต์ — ทำเครื่องหมายทันทีเมื่อปล่อยเมาส์",
         "underline": "ลากคลุมข้อความที่ต้องการขีดเส้นใต้",
         "strike": "ลากคลุมข้อความที่ต้องการขีดฆ่า",
-        "text": "คลิกหรือลากกรอบบนหน้ากระดาษที่ต้องการวางข้อความ แล้วพิมพ์ข้อความ",
-        "edit_text": "ลากกรอบคลุมข้อความเดิมที่ต้องการแก้ แล้วพิมพ์ข้อความใหม่ (ข้อความเดิมจะถูกลบและแทนที่)",
-        "image": "ลากกรอบที่ต้องการวางรูปภาพหรือลายเซ็น แล้วเลือกไฟล์รูป (รองรับ PNG พื้นใส)",
+        "text": "คลิกหรือลากกรอบเพื่อวางข้อความ • วางแล้วลากย้ายได้ ลากมุมย่อ/ขยาย ดับเบิลคลิกเพื่อแก้ไข",
+        "edit_text": "คลิกที่ย่อหน้าเดิมเพื่อแก้/ลบ (หรือลากกรอบเลือกเฉพาะส่วน) • ผลที่ได้เป็นกล่องข้อความ ย้าย/แก้ต่อได้",
+        "image": "คลิกตำแหน่งที่ต้องการวางรูป/ลายเซ็น • วางแล้วลากย้าย ลากมุมปรับขนาด (กด Shift ที่มุม = ยืดอิสระ)",
         "pen": "กดค้างแล้วลากเพื่อวาดเส้นอิสระ — ใช้เซ็นชื่อหรือวงกลมจุดสำคัญ",
         "erase": "ลากกรอบคลุมส่วนที่ต้องการลบ — เนื้อหาในกรอบจะถูกลบออกจริงแล้วเทสีพื้นหลัง",
         "redact": "ลากกรอบคลุมข้อมูลลับ — ลบเนื้อหาออกถาวรและปิดด้วยแถบสีดำ",
@@ -402,7 +404,7 @@ class WelcomePage(QWidget):
         ic.setPixmap(icon("file-pdf-box", ACCENT, ACCENT).pixmap(84, 84))
         ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(ic)
-        t = QLabel("ยินดีต้อนรับสู่ PDF Studio")
+        t = QLabel("ยินดีต้อนรับสู่ PDF Governix")
         t.setObjectName("WelcomeTitle")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(t)
@@ -444,6 +446,10 @@ class WelcomePage(QWidget):
         mid.addStretch(1)
         outer.addLayout(mid)
         outer.addStretch(2)
+        foot = QLabel(f"{APP_NAME}  •  {COPYRIGHT}")
+        foot.setObjectName("WelcomeFoot")
+        foot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(foot)
 
     def set_recent(self, paths: list[str]) -> None:
         while self.recent_box.count():

@@ -21,6 +21,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QWidget
 
+from .objects import FloatObj, MIN_FONT, MAX_FONT, MIN_SIZE, image_preview, relayout, text_preview
 from .theme import ACCENT, VIEW_BG
 
 MARGIN = 28
@@ -47,6 +48,14 @@ class Tool(str, Enum):
 
 TEXT_TOOLS = {Tool.SELECT, Tool.HIGHLIGHT, Tool.UNDERLINE, Tool.STRIKE}
 RECT_TOOLS = {Tool.TEXT, Tool.EDIT_TEXT, Tool.IMAGE, Tool.ERASE, Tool.REDACT}
+OBJ_TOOLS = {Tool.SELECT, Tool.TEXT, Tool.IMAGE, Tool.EDIT_TEXT}     # เครื่องมือที่คลิกจับวัตถุลอยได้
+HANDLE_PX = 9.0
+HANDLE_CURSORS = {
+    "tl": Qt.CursorShape.SizeFDiagCursor, "br": Qt.CursorShape.SizeFDiagCursor,
+    "tr": Qt.CursorShape.SizeBDiagCursor, "bl": Qt.CursorShape.SizeBDiagCursor,
+    "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+    "l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+}
 
 
 # ───────────────────────── ดัชนีตัวอักษรของหน้า ─────────────────────────
@@ -62,6 +71,7 @@ class Ch:
 class PageText:
     chars: list[Ch] = field(default_factory=list)
     lines: list[tuple[int, int, QRectF]] = field(default_factory=list)  # (start, end, vbox)
+    line_block: list[int] = field(default_factory=list)                 # บรรทัด → เลขย่อหน้า/บล็อก
 
     @classmethod
     def build(cls, page: pymupdf.Page) -> "PageText":
@@ -71,7 +81,7 @@ class PageText:
             d = page.get_text("rawdict")
         except Exception:
             return pt
-        for block in d.get("blocks", []):
+        for bi, block in enumerate(d.get("blocks", [])):
             if block.get("type") != 0:
                 continue
             for line in block["lines"]:
@@ -88,7 +98,24 @@ class PageText:
                         vbox = v if vbox is None else vbox.united(v)
                 if len(pt.chars) > start and vbox is not None:
                     pt.lines.append((start, len(pt.chars), vbox))
+                    pt.line_block.append(bi)
         return pt
+
+    def paragraph_at(self, p: QPointF, tol: float = 5.0) -> QRectF | None:
+        """กรอบของย่อหน้า (บล็อกข้อความ) ที่จุด p อยู่บน/ใกล้ — ไม่มี = None"""
+        best, bd = None, tol * tol
+        for k, (_, _, box) in enumerate(self.lines):
+            d = self._dist(box, p)
+            if d <= bd:
+                best, bd = k, d
+        if best is None:
+            return None
+        blk = self.line_block[best]
+        r: QRectF | None = None
+        for k, (_, _, box) in enumerate(self.lines):
+            if self.line_block[k] == blk:
+                r = QRectF(box) if r is None else r.united(box)
+        return r
 
     @staticmethod
     def _dist(r: QRectF, p: QPointF) -> float:
@@ -156,7 +183,7 @@ class _Canvas(QWidget):
         super().__init__()
         self.setObjectName("Canvas")
         self.view = view
-        self.setMouseTracking(False)
+        self.setMouseTracking(True)
 
     def paintEvent(self, ev):  # noqa: N802
         self.view._paint(self, ev)
@@ -190,6 +217,11 @@ class PdfView(QScrollArea):
     markupReady = Signal(str)              # highlight | underline | strike
     contextRequested = Signal(QPoint, int, bool)
     fitModeChanged = Signal(str)
+    objectsChanged = Signal(list)          # รายการหน้าที่วัตถุลอยเปลี่ยน (ย้าย/ย่อขยายเสร็จ)
+    objectEditRequested = Signal(int)      # ดับเบิลคลิกกล่องข้อความ
+    objectDeleteRequested = Signal(int)
+    objectContextRequested = Signal(QPoint, int)
+    objectSelectionChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -230,6 +262,16 @@ class PdfView(QScrollArea):
         self._ink: list[QPointF] = []
         self._pan_origin: QPoint | None = None
         self._rubber: QRectF | None = None
+
+        # วัตถุลอย (รูป/ข้อความ)
+        self.get_objects = lambda: []
+        self.selected_uid: int | None = None
+        self._od: dict | None = None
+        self._nudge_pages: set[int] = set()
+        self._nudge_timer = QTimer(self)
+        self._nudge_timer.setSingleShot(True)
+        self._nudge_timer.setInterval(700)
+        self._nudge_timer.timeout.connect(self._flush_nudge)
 
         # ค้นหา
         self.hits: dict[int, list[QRectF]] = {}
@@ -407,6 +449,17 @@ class PdfView(QScrollArea):
         if emit:
             self._on_scroll()
 
+    def visible_center(self, page: int) -> QPointF:
+        """จุดกึ่งกลางของส่วนที่มองเห็นอยู่ของหน้านั้น (พิกัด pt)"""
+        pr, s = self.page_rects[page], self._scale(page)
+        vp = QRectF(self.horizontalScrollBar().value(), self.verticalScrollBar().value(),
+                    self.viewport().width(), self.viewport().height())
+        vis = vp.intersected(pr)
+        if vis.isEmpty():
+            vis = pr
+        c = vis.center()
+        return QPointF((c.x() - pr.left()) / s, (c.y() - pr.top()) / s)
+
     def scroll_to_rect(self, page: int, rect: QRectF) -> None:
         if not (0 <= page < len(self.page_rects)):
             return
@@ -538,6 +591,7 @@ class PdfView(QScrollArea):
             else:
                 p.setPen(QColor("#9AA3B5"))
                 p.drawText(r, Qt.AlignmentFlag.AlignCenter, "กำลังโหลด…")
+            self._paint_objects(p, i, r)
             self._paint_overlays(p, i, r)
 
     def _scale(self, i: int) -> float:
@@ -546,6 +600,236 @@ class PdfView(QScrollArea):
     def _to_canvas(self, i: int, r: QRectF) -> QRectF:
         pr, s = self.page_rects[i], self._scale(i)
         return QRectF(pr.left() + r.left() * s, pr.top() + r.top() * s, r.width() * s, r.height() * s)
+
+    # ───────── วัตถุลอย ─────────
+    def selected_object(self) -> FloatObj | None:
+        if self.selected_uid is None:
+            return None
+        return next((o for o in self.get_objects() if o.uid == self.selected_uid), None)
+
+    def select_object(self, uid: int | None) -> None:
+        if uid != self.selected_uid:
+            self.selected_uid = uid
+            self.canvas.update()
+            self.objectSelectionChanged.emit()
+
+    def _obj_rect(self, o: FloatObj) -> QRectF | None:
+        if not (0 <= o.page < len(self.page_rects)):
+            return None
+        return self._to_canvas(o.page, QRectF(o.x, o.y, o.w, o.h))
+
+    @staticmethod
+    def _handle_points(r: QRectF, is_text: bool) -> dict[str, QPointF]:
+        pts = {
+            "tl": r.topLeft(), "tr": r.topRight(), "bl": r.bottomLeft(), "br": r.bottomRight(),
+            "l": QPointF(r.left(), r.center().y()), "r": QPointF(r.right(), r.center().y()),
+        }
+        if not is_text:
+            pts["t"] = QPointF(r.center().x(), r.top())
+            pts["b"] = QPointF(r.center().x(), r.bottom())
+        return pts
+
+    def _hit_handle(self, o: FloatObj, pos: QPointF) -> str | None:
+        r = self._obj_rect(o)
+        if r is None:
+            return None
+        reach = HANDLE_PX * 0.9
+        for name, pt in self._handle_points(r, o.is_text).items():
+            if abs(pos.x() - pt.x()) <= reach and abs(pos.y() - pt.y()) <= reach:
+                return name
+        return None
+
+    def _hit_object(self, pos: QPointF) -> FloatObj | None:
+        for o in reversed(self.get_objects()):
+            r = self._obj_rect(o)
+            if r is not None and r.adjusted(-4, -4, 4, 4).contains(pos):
+                return o
+        return None
+
+    def _paint_objects(self, p: QPainter, i: int, pr: QRectF) -> None:
+        objs = [o for o in self.get_objects() if o.page == i]
+        if not objs:
+            return
+        dpr = self.canvas.devicePixelRatioF()
+        s = self._scale(i)
+        for o in objs:
+            r = self._obj_rect(o)
+            if r is None:
+                continue
+            try:
+                if o.is_text:
+                    img = text_preview(o, s * dpr)
+                else:
+                    img = image_preview(o, round(r.width() * dpr), round(r.height() * dpr))
+                if not img.isNull():
+                    p.drawImage(r, img)
+            except Exception:
+                p.setPen(QPen(QColor("#E03131"), 1))
+                p.drawRect(r)
+        sel = self.selected_object()
+        if sel is not None and sel.page == i:
+            r = self._obj_rect(sel)
+            if r is None:
+                return
+            col = QColor(ACCENT)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(col, 1.4))
+            p.drawRect(r)
+            p.setBrush(QColor("white"))
+            p.setPen(QPen(col, 1.6))
+            h = HANDLE_PX
+            for pt in self._handle_points(r, sel.is_text).values():
+                p.drawRoundedRect(QRectF(pt.x() - h / 2, pt.y() - h / 2, h, h), 2.5, 2.5)
+
+    def _begin_obj_drag(self, o: FloatObj, mode: str, pos: QPointF) -> None:
+        loc = self._locate(pos, prefer=o.page)
+        if loc is None:
+            return
+        pt = loc[1]
+        self._od = {
+            "uid": o.uid, "mode": mode, "orig": o.rect(), "size": o.style.size,
+            "orig_page": o.page, "grab": (pt.x() - o.x, pt.y() - o.y), "moved": False, "origin": pos,
+        }
+        self.canvas.setCursor(QCursor(HANDLE_CURSORS.get(mode, Qt.CursorShape.SizeAllCursor)))
+
+    def _press_object(self, pos: QPointF) -> bool:
+        sel = self.selected_object()
+        if sel is not None:
+            h = self._hit_handle(sel, pos)
+            if h:
+                self._begin_obj_drag(sel, h, pos)
+                return True
+        o = self._hit_object(pos)
+        if o is not None:
+            self.clear_selection()
+            self.select_object(o.uid)
+            self._begin_obj_drag(o, "move", pos)
+            return True
+        if sel is not None:
+            self.select_object(None)
+        return False
+
+    def _obj_drag_move(self, ev) -> None:
+        od = self._od
+        o = next((q for q in self.get_objects() if q.uid == od["uid"]), None) if od else None
+        if od is None or o is None:
+            return
+        pos = ev.position()
+        if not od["moved"] and (pos - od["origin"]).manhattanLength() < 3:
+            return                      # ขยับเล็กน้อยยังไม่ถือว่าลาก (กันมือสั่นตอนคลิก)
+        od["moved"] = True
+        if od["mode"] == "move":
+            loc = self._locate(pos)
+            if loc is None:
+                return
+            j, pt = loc
+            o.page = j
+            pw, ph = self.sizes[j]
+            gx, gy = od["grab"]
+            o.x = min(max(pt.x() - gx, -(o.w - 20)), pw - 20)
+            o.y = min(max(pt.y() - gy, -(o.h - 20)), ph - 20)
+        else:
+            loc = self._locate(pos, prefer=o.page)
+            if loc is None:
+                return
+            self._resize_obj(o, od, loc[1], bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+        p_ = pos.toPoint()
+        self.ensureVisible(p_.x(), p_.y(), 24, 24)
+        self.canvas.update()
+
+    def _resize_obj(self, o: FloatObj, od: dict, pt: QPointF, free: bool) -> None:
+        x0, y0, w0, h0 = od["orig"]
+        name = od["mode"]
+        hx = -1 if "l" in name else (1 if "r" in name else 0)
+        vy = -1 if "t" in name else (1 if "b" in name else 0)
+        ax = x0 if hx == 1 else x0 + w0            # จุดยึด (ขอบ/มุมตรงข้ามที่ไม่ขยับ)
+        ay = y0 if vy == 1 else y0 + h0
+        corner = hx != 0 and vy != 0
+        if o.is_text:
+            if corner:                              # มุม → ย่อ/ขยายทั้งกล่องรวมขนาดตัวอักษร
+                k = max(max(MIN_SIZE, (pt.x() - ax) * hx) / w0, max(MIN_SIZE, (pt.y() - ay) * vy) / h0)
+                size = min(max(od["size"] * k, MIN_FONT), MAX_FONT)
+                k = size / od["size"]
+                o.style.size = round(size, 2)
+                o.w = w0 * k
+                relayout(o)
+                o.x = ax if hx == 1 else ax - o.w
+                o.y = ay if vy == 1 else ay - o.h
+            else:                                   # ขอบซ้าย/ขวา → เปลี่ยนความกว้าง (ตัดบรรทัดใหม่)
+                o.w = max(24.0, (pt.x() - ax) * hx)
+                relayout(o)
+                o.x = ax if hx == 1 else ax - o.w
+            return
+        if corner and not free:                     # รูป: มุมคงสัดส่วน (กด Shift เพื่อยืดอิสระ)
+            k = max(max(MIN_SIZE, (pt.x() - ax) * hx) / w0, max(MIN_SIZE, (pt.y() - ay) * vy) / h0)
+            o.w, o.h = w0 * k, h0 * k
+            o.x = ax if hx == 1 else ax - o.w
+            o.y = ay if vy == 1 else ay - o.h
+            return
+        left, right, top, bottom = x0, x0 + w0, y0, y0 + h0
+        if hx == 1:
+            right = max(pt.x(), left + MIN_SIZE)
+        elif hx == -1:
+            left = min(pt.x(), right - MIN_SIZE)
+        if vy == 1:
+            bottom = max(pt.y(), top + MIN_SIZE)
+        elif vy == -1:
+            top = min(pt.y(), bottom - MIN_SIZE)
+        o.x, o.y, o.w, o.h = left, top, right - left, bottom - top
+
+    def _finish_obj_drag(self) -> None:
+        od, self._od = self._od, None
+        self._apply_cursor()
+        if od and od["moved"]:
+            o = next((q for q in self.get_objects() if q.uid == od["uid"]), None)
+            pages = {od["orig_page"]} | ({o.page} if o else set())
+            self.objectsChanged.emit(sorted(pages))
+
+    def _hover(self, pos: QPointF) -> None:
+        if self.tool not in OBJ_TOOLS or not self.get_objects():
+            return
+        cur = None
+        sel = self.selected_object()
+        if sel is not None:
+            h = self._hit_handle(sel, pos)
+            if h:
+                cur = HANDLE_CURSORS[h]
+        if cur is None and self._hit_object(pos) is not None:
+            cur = Qt.CursorShape.SizeAllCursor
+        if cur is None:
+            self._apply_cursor()
+        else:
+            self.canvas.setCursor(QCursor(cur))
+
+    def nudge_selected(self, dx: float, dy: float) -> None:
+        o = self.selected_object()
+        if o is None:
+            return
+        o.x += dx
+        o.y += dy
+        self._nudge_pages.add(o.page)
+        self._nudge_timer.start()
+        self.canvas.update()
+
+    def _flush_nudge(self) -> None:
+        if self._nudge_pages:
+            pages, self._nudge_pages = sorted(self._nudge_pages), set()
+            self.objectsChanged.emit(pages)
+
+    def keyPressEvent(self, ev):  # noqa: N802
+        o = self.selected_object()
+        if o is not None:
+            k = ev.key()
+            step = 10.0 if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
+            if k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                self.objectDeleteRequested.emit(o.uid)
+                return
+            moves = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0),
+                     Qt.Key.Key_Up: (0, -step), Qt.Key.Key_Down: (0, step)}
+            if k in moves:
+                self.nudge_selected(*moves[k])
+                return
+        super().keyPressEvent(ev)
 
     def _paint_overlays(self, p: QPainter, i: int, pr: QRectF) -> None:
         p.setPen(Qt.PenStyle.NoPen)
@@ -557,7 +841,7 @@ class PdfView(QScrollArea):
         # ข้อความที่เลือก
         if self._sel and self._sel[0] == i:
             pt = self._text(i)
-            p.setBrush(QColor(59, 91, 219, 80))
+            p.setBrush(QColor(124, 58, 237, 70))
             for box in pt.line_boxes(self._sel[1], self._sel[2], vis=True):
                 p.drawRect(self._to_canvas(i, box))
         # กรอบที่กำลังลาก
@@ -605,6 +889,8 @@ class PdfView(QScrollArea):
         self._ink = []
         if tool not in TEXT_TOOLS:
             self.clear_selection()
+        if tool not in OBJ_TOOLS:
+            self.select_object(None)
         self._apply_cursor()
 
     def _apply_cursor(self) -> None:
@@ -627,6 +913,8 @@ class PdfView(QScrollArea):
         if self.tool == Tool.HAND:
             self._pan_origin = ev.globalPosition().toPoint()
             self.canvas.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return
+        if self.tool in OBJ_TOOLS and self._press_object(pos):
             return
         loc = self._locate(pos)
         if loc is None:
@@ -651,7 +939,11 @@ class PdfView(QScrollArea):
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - d.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - d.y())
             return
+        if self._od is not None:
+            self._obj_drag_move(ev)
+            return
         if self._drag_page is None:
+            self._hover(ev.position())
             return
         i = self._drag_page
         loc = self._locate(ev.position(), prefer=i)
@@ -684,6 +976,9 @@ class PdfView(QScrollArea):
             self._pan_origin = None
             self._apply_cursor()
             return
+        if self._od is not None:
+            self._finish_obj_drag()
+            return
         i = self._drag_page
         if i is None:
             return
@@ -706,6 +1001,14 @@ class PdfView(QScrollArea):
             if r is None:
                 return
             if r.width() < 4 and r.height() < 4:
+                if self.tool == Tool.EDIT_TEXT:       # คลิกที่ย่อหน้า → เลือกทั้งย่อหน้านั้นมาแก้
+                    box = self._text(i).paragraph_at(self._drag_start)
+                    if box is not None:
+                        self.rectDrawn.emit(i, box)
+                    return
+                if self.tool == Tool.IMAGE:           # คลิกเฉยๆ → วางรูปขนาดมาตรฐานตรงจุดที่คลิก
+                    self.rectDrawn.emit(i, QRectF(r.x(), r.y(), 1.0, 1.0))
+                    return
                 if self.tool != Tool.TEXT:
                     return
                 pw = self.sizes[i][0]
@@ -715,7 +1018,15 @@ class PdfView(QScrollArea):
             self.rectDrawn.emit(i, r)
 
     def _double_click(self, ev) -> None:
-        if self.tool not in TEXT_TOOLS or self.doc is None:
+        if self.doc is None:
+            return
+        if self.tool in OBJ_TOOLS:
+            o = self._hit_object(ev.position())
+            if o is not None:
+                if o.is_text:
+                    self.objectEditRequested.emit(o.uid)
+                return
+        if self.tool not in TEXT_TOOLS:
             return
         loc = self._locate(ev.position())
         if loc is None:
@@ -742,6 +1053,13 @@ class PdfView(QScrollArea):
         return False
 
     def _context(self, ev) -> None:
+        if self.tool in OBJ_TOOLS:
+            o = self._hit_object(QPointF(ev.pos()))
+            if o is not None:
+                self.clear_selection()
+                self.select_object(o.uid)
+                self.objectContextRequested.emit(ev.globalPos(), o.uid)
+                return
         loc = self._locate(QPointF(ev.pos()))
         page = loc[0] if loc else self._current
         self.contextRequested.emit(ev.globalPos(), page, self.has_selection())

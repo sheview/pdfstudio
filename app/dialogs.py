@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QFileInfo, QSettings, QSize, Qt, QUrl
-from PySide6.QtGui import QColor, QFontDatabase
+from PySide6.QtGui import QColor, QFontDatabase, QIntValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -36,7 +36,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import ops
-from .config import APP_NAME, APP_VERSION, ORG_NAME
+from .config import APP_NAME, APP_VERSION, COPYRIGHT, ORG_NAME
+from .fontpick import FontCombo, SizeCombo
 from .icons import icon
 from .textrender import TextStyle, default_thai_font
 from .theme import ACCENT, MUTED
@@ -80,10 +81,12 @@ def ask_password(parent, filename: str) -> str | None:
 
 # ───────────────────────── ใส่ / แก้ข้อความ ─────────────────────────
 class TextDialog(QDialog):
-    def __init__(self, parent, title: str, text: str = "", style: TextStyle | None = None, sub: str = ""):
+    def __init__(self, parent, title: str, text: str = "", style: TextStyle | None = None, sub: str = "",
+                 deletable: bool = False):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(600)
+        self.deleted = False
         st = style or TextStyle()
         if not st.family:
             st.family = default_thai_font()
@@ -96,19 +99,11 @@ class TextDialog(QDialog):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.font_box = QFontComboBox()
-        self.font_box.setWritingSystem(QFontDatabase.WritingSystem.Thai)
-        self.font_box.setCurrentFont(st.qfont())
-        self.font_box.setMinimumWidth(190)
-        self.size_box = QDoubleSpinBox()
-        self.size_box.setRange(4, 300)
-        self.size_box.setDecimals(1)
-        self.size_box.setValue(st.size)
-        self.size_box.setSuffix(" pt")
-        self.size_box.setFixedWidth(96)
-        self.size_box.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        self.font_box = FontCombo(st.family)
+        self.size_box = SizeCombo(st.size)
         row.addWidget(self.font_box, 1)
         row.addWidget(self.size_box)
+        row.addWidget(QLabel("pt"))
         self.b_bold = self._toggle("format-bold", "ตัวหนา", st.bold)
         self.b_italic = self._toggle("format-italic", "ตัวเอียง", st.italic)
         self.b_under = self._toggle("format-underline", "ขีดเส้นใต้", st.underline)
@@ -151,10 +146,15 @@ class TextDialog(QDialog):
         self.edit.setMinimumHeight(150)
         self.edit.setPlaceholderText("พิมพ์ข้อความที่ต้องการ… (กด Enter เพื่อขึ้นบรรทัดใหม่)")
         lay.addWidget(self.edit, 1)
-        lay.addWidget(_buttons(self, "ตกลง"))
+        btns = _buttons(self, "ตกลง")
+        if deletable:
+            d = btns.addButton("ลบข้อความนี้", QDialogButtonBox.ButtonRole.DestructiveRole)
+            d.setObjectName("Danger")
+            d.clicked.connect(self._delete)
+        lay.addWidget(btns)
 
-        self.font_box.currentFontChanged.connect(self._sync)
-        self.size_box.valueChanged.connect(self._sync)
+        self.font_box.changed.connect(self._sync)
+        self.size_box.changed.connect(self._sync)
         self.colors.colorChanged.connect(self._sync)
         for b in (self.b_bold, self.b_italic, self.b_under):
             b.toggled.connect(self._sync)
@@ -162,6 +162,10 @@ class TextDialog(QDialog):
         self._sync()
         self.edit.setFocus()
         self.edit.selectAll()
+
+    def _delete(self) -> None:
+        self.deleted = True
+        self.accept()
 
     def _toggle(self, ic: str, tip: str, on: bool) -> QToolButton:
         b = QToolButton()
@@ -193,7 +197,7 @@ class TextDialog(QDialog):
 
     def style_value(self) -> TextStyle:
         return TextStyle(
-            family=self.font_box.currentFont().family(),
+            family=self.font_box.family(),
             size=self.size_box.value(),
             color=self.colors.color().name(),
             bold=self.b_bold.isChecked(),
@@ -594,12 +598,266 @@ class ExportImageDialog(QDialog):
 
 
 # ───────────────────────── เกี่ยวกับ ─────────────────────────
+# ───────────────────────── ลายน้ำ ─────────────────────────
+class WatermarkDialog(QDialog):
+    PRESETS = ["ลับ", "ห้ามเผยแพร่", "สำเนา", "ฉบับร่าง", "ใช้ภายในเท่านั้น", "CONFIDENTIAL", "DRAFT", "COPY"]
+
+    def __init__(self, parent, doc: pymupdf.Document, current: int, start_dir: str = "", default_style: TextStyle | None = None):
+        super().__init__(parent)
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QSlider
+
+        self.setWindowTitle("ใส่ลายน้ำ")
+        self.setMinimumWidth(820)
+        self._doc, self._cur, self._dir = doc, current, start_dir
+        self._image: bytes | None = None
+        st = default_style or TextStyle()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(180)
+        self._timer.timeout.connect(self._update_preview)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 18)
+        root.setSpacing(20)
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        left.addWidget(_title("ใส่ลายน้ำ", "ข้อความหรือรูปโปร่งแสงวางทับเอกสาร เช่น “ลับ” “ฉบับร่าง” หรือโลโก้บริษัท"))
+
+        kind = QHBoxLayout()
+        self.r_text = QRadioButton("ข้อความ")
+        self.r_image = QRadioButton("รูปภาพ / โลโก้")
+        self.r_text.setChecked(True)
+        kind.addWidget(self.r_text)
+        kind.addWidget(self.r_image)
+        kind.addStretch(1)
+        left.addLayout(kind)
+
+        # ── ข้อความ ──
+        self.box_text = QWidget()
+        tv = QVBoxLayout(self.box_text)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(8)
+        self.text_box = QComboBox()
+        self.text_box.setEditable(True)
+        self.text_box.addItems(self.PRESETS)
+        self.text_box.setCurrentText(self.PRESETS[0])
+        tv.addWidget(self.text_box)
+        row = QHBoxLayout()
+        self.font_box = FontCombo(st.family)
+        self.size_box = SizeCombo(72)
+        self.b_bold = QToolButton()
+        self.b_bold.setIcon(icon("format-bold"))
+        self.b_bold.setCheckable(True)
+        self.b_bold.setChecked(True)
+        self.b_bold.setToolTip("ตัวหนา")
+        row.addWidget(self.font_box, 1)
+        row.addWidget(self.size_box)
+        row.addWidget(QLabel("pt"))
+        row.addWidget(self.b_bold)
+        tv.addLayout(row)
+        crow = QHBoxLayout()
+        lab = QLabel("สี")
+        lab.setStyleSheet(f"color:{MUTED};")
+        crow.addWidget(lab)
+        self.colors = ColorRow(["#808080", "#E03131", "#1C7ED6", "#2F9E44", "#F59F00", "#000000"], "#808080")
+        crow.addWidget(self.colors)
+        crow.addStretch(1)
+        tv.addLayout(crow)
+        left.addWidget(self.box_text)
+
+        # ── รูป ──
+        self.box_img = QWidget()
+        iv = QVBoxLayout(self.box_img)
+        iv.setContentsMargins(0, 0, 0, 0)
+        irow = QHBoxLayout()
+        self.btn_img = QPushButton("  เลือกไฟล์รูป…")
+        self.btn_img.setIcon(icon("image-plus-outline"))
+        self.btn_img.clicked.connect(self._pick_image)
+        self.lbl_img = QLabel("ยังไม่ได้เลือกรูป (แนะนำ PNG พื้นใส)")
+        self.lbl_img.setStyleSheet(f"color:{MUTED};")
+        irow.addWidget(self.btn_img)
+        irow.addWidget(self.lbl_img, 1)
+        iv.addLayout(irow)
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("ขนาด (% ของความกว้างหน้า)"))
+        self.img_size = QSlider(Qt.Orientation.Horizontal)
+        self.img_size.setRange(10, 100)
+        self.img_size.setValue(50)
+        self.img_size_lbl = QLabel("50%")
+        self.img_size_lbl.setFixedWidth(40)
+        self.img_size.valueChanged.connect(lambda v: self.img_size_lbl.setText(f"{v}%"))
+        srow.addWidget(self.img_size, 1)
+        srow.addWidget(self.img_size_lbl)
+        iv.addLayout(srow)
+        self.box_img.setVisible(False)
+        left.addWidget(self.box_img)
+
+        # ── ร่วม ──
+        form = QFormLayout()
+        form.setSpacing(8)
+        self.op = QSlider(Qt.Orientation.Horizontal)
+        self.op.setRange(5, 100)
+        self.op.setValue(25)
+        self.op_lbl = QLabel("25%")
+        self.op_lbl.setFixedWidth(40)
+        self.op.valueChanged.connect(lambda v: self.op_lbl.setText(f"{v}%"))
+        orow = QHBoxLayout()
+        orow.addWidget(self.op, 1)
+        orow.addWidget(self.op_lbl)
+        form.addRow("ความโปร่งแสง (ทึบ)", orow)
+        self.angle = QComboBox()
+        self.angle.setEditable(True)
+        self.angle.setFixedWidth(120)
+        self.angle.addItems(["0", "15", "30", "45", "60", "90", "-15", "-30", "-45", "-60", "-90"])
+        self.angle.setCurrentText("45")
+        self.angle.lineEdit().setValidator(QIntValidator(-180, 180, self))
+        self.angle.setToolTip("มุมเอียง (องศา): 45 = เฉียงขึ้นขวา, 0 = แนวนอน")
+        arow = QHBoxLayout()
+        arow.addWidget(self.angle)
+        arow.addWidget(QLabel("องศา"))
+        arow.addStretch(1)
+        form.addRow("มุมเอียง", arow)
+        self.layout_box = QComboBox()
+        self.layout_box.addItems(["วางกึ่งกลางหน้า", "ซ้ำเต็มหน้า"])
+        form.addRow("การวาง", self.layout_box)
+        self.layer_box = QComboBox()
+        self.layer_box.addItems(["ทับด้านหน้าเนื้อหา", "อยู่ด้านหลังเนื้อหา"])
+        form.addRow("ชั้น", self.layer_box)
+        left.addLayout(form)
+
+        pg = QHBoxLayout()
+        self.p_all = QRadioButton("ทุกหน้า")
+        self.p_cur = QRadioButton(f"หน้าปัจจุบัน ({current + 1})")
+        self.p_rng = QRadioButton("ระบุหน้า")
+        self.p_all.setChecked(True)
+        self.p_edit = QLineEdit()
+        self.p_edit.setPlaceholderText(f"เช่น 1-3, 5 (ทั้งหมด {doc.page_count} หน้า)")
+        self.p_edit.setEnabled(False)
+        self.p_rng.toggled.connect(self.p_edit.setEnabled)
+        for w in (self.p_all, self.p_cur, self.p_rng):
+            pg.addWidget(w)
+        pg.addWidget(self.p_edit, 1)
+        left.addLayout(pg)
+        left.addStretch(1)
+        left.addWidget(_buttons(self, "ใส่ลายน้ำ"))
+        root.addLayout(left, 1)
+
+        # ── ตัวอย่าง ──
+        right = QVBoxLayout()
+        cap = QLabel("ตัวอย่าง")
+        cap.setStyleSheet(f"color:{MUTED};font-weight:600;")
+        right.addWidget(cap)
+        self.preview = QLabel()
+        self.preview.setFixedSize(280, 380)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setStyleSheet("background:#E3E1EF;border-radius:10px;")
+        right.addWidget(self.preview)
+        right.addStretch(1)
+        root.addLayout(right)
+
+        self.r_text.toggled.connect(self._mode)
+        for sig in (self.text_box.currentTextChanged, self.font_box.changed, self.size_box.changed, self.colors.colorChanged,
+                    self.b_bold.toggled, self.img_size.valueChanged, self.op.valueChanged, self.angle.currentTextChanged,
+                    self.layout_box.currentIndexChanged, self.layer_box.currentIndexChanged):
+            sig.connect(self._queue)
+        self._mode()
+
+    def _mode(self) -> None:
+        t = self.r_text.isChecked()
+        self.box_text.setVisible(t)
+        self.box_img.setVisible(not t)
+        self.angle.setCurrentText("45" if t else "0")
+        self._queue()
+
+    def _queue(self, *_):
+        self._timer.start()
+
+    def _pick_image(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(self, "เลือกรูปลายน้ำ", self._dir, "รูปภาพ (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if f:
+            try:
+                self._image = Path(f).read_bytes()
+            except OSError as e:
+                QMessageBox.warning(self, "เปิดไฟล์ไม่ได้", str(e))
+                return
+            self.lbl_img.setText(Path(f).name)
+            self._queue()
+
+    def _angle(self) -> float:
+        try:
+            return float(self.angle.currentText())
+        except ValueError:
+            return 0.0
+
+    def kwargs(self) -> dict:
+        kw = dict(opacity=self.op.value() / 100.0, angle=self._angle(),
+                  tile=self.layout_box.currentIndex() == 1, behind=self.layer_box.currentIndex() == 1)
+        if self.r_image.isChecked():
+            kw.update(image=self._image, img_frac=self.img_size.value() / 100.0)
+        else:
+            kw.update(text=self.text_box.currentText(), style=TextStyle(
+                family=self.font_box.family(), size=self.size_box.value(), color=self.colors.color().name(),
+                bold=self.b_bold.isChecked(), align="center"))
+        return kw
+
+    def pages(self) -> list[int]:
+        n = self._doc.page_count
+        if self.p_cur.isChecked():
+            return [self._cur]
+        if self.p_rng.isChecked():
+            return parse_page_range(self.p_edit.text(), n)
+        return list(range(n))
+
+    def _update_preview(self) -> None:
+        from PySide6.QtGui import QImage, QPixmap
+
+        try:
+            kw = self.kwargs()
+            if self.r_image.isChecked() and not self._image:
+                kw = None
+        except Exception:
+            kw = None
+        try:
+            tmp = pymupdf.open()
+            tmp.insert_pdf(self._doc, from_page=self._cur, to_page=self._cur)
+            if kw is not None and (kw.get("image") or str(kw.get("text", "")).strip()):
+                ops.add_watermark(tmp, [0], **kw)
+            page = tmp[0]
+            z = min(272 / page.rect.width, 372 / page.rect.height)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(z, z), alpha=False)
+            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+            tmp.close()
+            self.preview.setPixmap(QPixmap.fromImage(img))
+        except Exception as e:
+            self.preview.setText(str(e))
+
+    def showEvent(self, ev):  # noqa: N802
+        super().showEvent(ev)
+        self._update_preview()
+
+    def accept(self) -> None:
+        if self.r_image.isChecked() and not self._image:
+            QMessageBox.warning(self, "ลายน้ำ", "กรุณาเลือกไฟล์รูปก่อน")
+            return
+        if self.r_text.isChecked() and not self.text_box.currentText().strip():
+            QMessageBox.warning(self, "ลายน้ำ", "กรุณาพิมพ์ข้อความลายน้ำ")
+            return
+        try:
+            if not self.pages():
+                raise ValueError("ไม่ได้เลือกหน้า")
+        except Exception as e:
+            QMessageBox.warning(self, "ระบุหน้าไม่ถูกต้อง", str(e))
+            return
+        super().accept()
+
+
 def show_about(parent) -> None:
-    org = f"\n{ORG_NAME}" if ORG_NAME else ""
     QMessageBox.about(
         parent,
         f"เกี่ยวกับ {APP_NAME}",
         f"<h3>{APP_NAME} <span style='color:{MUTED};font-weight:400'>v{APP_VERSION}</span></h3>"
         "<p>โปรแกรมดู แก้ไข รวมไฟล์ และพิมพ์ PDF สำหรับใช้งานภายในองค์กร</p>"
-        f"<p style='color:{MUTED}'>สร้างด้วย Python • PySide6 (Qt) • PyMuPDF{org.replace(chr(10), '<br>')}</p>",
+        f"<p><b>{ORG_NAME}</b><br>{COPYRIGHT}</p>"
+        f"<p style='color:{MUTED}'>สร้างด้วย Python • PySide6 (Qt) • PyMuPDF • ฟอนต์ Prompt (SIL Open Font License)</p>",
     )

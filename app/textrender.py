@@ -24,7 +24,7 @@ from PySide6.QtGui import (
 )
 
 THAI_FONT_CANDIDATES = [
-    "Leelawadee UI", "Tahoma", "Sarabun", "TH Sarabun New", "Angsana New",
+    "Prompt", "Leelawadee UI", "Tahoma", "Sarabun", "TH Sarabun New", "Angsana New",
     "Cordia New", "Loma", "Garuda", "Norasi", "Noto Sans Thai", "Segoe UI",
 ]
 
@@ -91,12 +91,9 @@ def _make_writer(buf: QBuffer, w: float, h: float) -> QPdfWriter:
     return writer
 
 
-def render_text_pdf(text: str, style: TextStyle, width: float | None) -> tuple[bytes, float, float]:
-    """คืน (pdf_bytes, กว้าง, สูง) หน่วยเป็น pt
-
-    width=None → กว้างตามความยาวข้อความจริง (ไม่ตัดบรรทัดอัตโนมัติ)
-    """
-    # 1) วัดขนาดด้วย writer ชั่วคราว (ความละเอียดเดียวกับตอนวาดจริง)
+def measure_text(text: str, style: TextStyle, width: float | None) -> tuple[float, float]:
+    """วัดขนาด (กว้าง, สูง) หน่วย pt ของข้อความ — ใช้ตัวจัดวางเดียวกับตอนสร้าง PDF จริง"""
+    # วัดด้วย writer ชั่วคราว (ความละเอียดเดียวกับตอนวาดจริง)
     probe_buf = QBuffer()
     probe_buf.open(QIODevice.OpenModeFlag.WriteOnly)
     probe = _make_writer(probe_buf, 100, 100)
@@ -109,9 +106,17 @@ def render_text_pdf(text: str, style: TextStyle, width: float | None) -> tuple[b
         w = width
     size = doc.size()
     h = max(size.height(), style.size * 1.2)
-    w = max(w, 1.0)
+    return max(float(w), 1.0), float(h)
 
-    # 2) วาดลง PDF จริง
+
+def render_text_pdf(text: str, style: TextStyle, width: float | None) -> tuple[bytes, float, float]:
+    """คืน (pdf_bytes, กว้าง, สูง) หน่วยเป็น pt
+
+    width=None → กว้างตามความยาวข้อความจริง (ไม่ตัดบรรทัดอัตโนมัติ)
+    """
+    w, h = measure_text(text, style, width)
+
+    # วาดลง PDF จริง
     buf = QBuffer()
     buf.open(QIODevice.OpenModeFlag.WriteOnly)
     writer = _make_writer(buf, w, h)
@@ -122,3 +127,65 @@ def render_text_pdf(text: str, style: TextStyle, width: float | None) -> tuple[b
     painter.end()
     buf.close()
     return bytes(buf.data()), float(w), float(h)
+
+
+def render_watermark_pdf(
+    w: float, h: float, *, text: str = "", style: TextStyle | None = None, image=None,
+    opacity: float = 0.25, angle: float = 45.0, tile: bool = False, img_frac: float = 0.5,
+) -> bytes:
+    """สร้างหน้า PDF ขนาด w×h ที่มีลายน้ำ (ข้อความหรือรูป) โปร่งแสง หมุนตามองศา — เป็นเวกเตอร์ ข้อความยังค้นหาได้"""
+    import math
+
+    from PySide6.QtCore import QRectF
+
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    writer = _make_writer(buf, w, h)
+    painter = QPainter(writer)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    painter.setOpacity(max(0.02, min(opacity, 1.0)))
+
+    if image is not None and not image.isNull():
+        iw = max(20.0, w * img_frac)
+        ih = iw * image.height() / image.width()
+
+        def draw() -> None:
+            painter.drawImage(QRectF(-iw / 2, -ih / 2, iw, ih), image)
+        iw_, ih_ = iw, ih
+    else:
+        st = style or TextStyle()
+        doc = _build_doc(text, st, None, writer)
+        doc.setTextWidth(-1)
+        tw = doc.idealWidth() + 2
+        doc.setTextWidth(tw)
+        th = doc.size().height()
+
+        def draw() -> None:
+            painter.translate(-tw / 2, -th / 2)
+            doc.drawContents(painter)
+        iw_, ih_ = tw, th
+
+    def place(cx: float, cy: float) -> None:
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(-angle)
+        draw()
+        painter.restore()
+
+    if not tile:
+        place(w / 2, h / 2)
+    else:
+        step = math.hypot(iw_, ih_) * 1.25
+        step = max(step, 40.0)
+        row, y = 0, -step / 2
+        while y < h + step:
+            x = -step / 2 + (step / 2 if row % 2 else 0)
+            while x < w + step:
+                place(x, y)
+                x += step
+            y += step
+            row += 1
+    painter.end()
+    buf.close()
+    return bytes(buf.data())

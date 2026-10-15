@@ -1,4 +1,4 @@
-"""PDF Studio — จุดเริ่มต้นโปรแกรม"""
+"""PDF Governix — จุดเริ่มต้นโปรแกรม"""
 from __future__ import annotations
 
 import sys
@@ -15,7 +15,7 @@ def main() -> int:
     if sys.platform == "win32":  # ให้ไอคอนบนแถบงานเป็นของโปรแกรม ไม่ใช่ของ python
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PDFStudio.App")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Governix.PDFGovernix.App")
         except Exception:
             pass
 

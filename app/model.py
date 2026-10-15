@@ -1,13 +1,16 @@
 """โมเดลเอกสาร: เก็บ pymupdf.Document + ประวัติย้อนกลับ/ทำซ้ำ (แบบ snapshot)"""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QObject, Signal
 
+from . import objects as objs_mod
 from . import ops
 from .config import MAX_UNDO
+from .objects import FloatObj
 
 
 class PdfModel(QObject):
@@ -19,8 +22,9 @@ class PdfModel(QObject):
         self.doc = doc
         self.path = path
         self.was_encrypted = False
-        self._undo: list[bytes] = []
-        self._redo: list[bytes] = []
+        self.objects: list[FloatObj] = []     # วัตถุลอย (รูป/ข้อความ) ที่ยังไม่ฝังลงเอกสาร
+        self._undo: list[tuple[bytes, list[FloatObj]]] = []
+        self._redo: list[tuple[bytes, list[FloatObj]]] = []
         self._dirty = False
         self.version = 0
         self._current = self._snapshot()
@@ -67,36 +71,72 @@ class PdfModel(QObject):
     def can_redo(self) -> bool:
         return bool(self._redo)
 
-    # ── snapshot ──
-    def _snapshot(self) -> bytes:
-        return self.doc.tobytes(garbage=0, deflate=False, encryption=pymupdf.PDF_ENCRYPT_NONE)
+    # ── วัตถุลอย ──
+    def objects_on(self, page: int) -> list[FloatObj]:
+        return [o for o in self.objects if o.page == page]
 
-    def commit(self) -> None:
-        """เรียกหลังแก้ไขเอกสารเสร็จ เพื่อบันทึกจุดย้อนกลับ"""
+    def find_object(self, uid: int | None) -> FloatObj | None:
+        if uid is None:
+            return None
+        return next((o for o in self.objects if o.uid == uid), None)
+
+    def flatten(self, pages: set[int] | None = None) -> set[int]:
+        """ฝังวัตถุลอยลงเนื้อหาเอกสาร (pages=None คือทุกหน้า) คืนเลขหน้าที่ถูกฝัง — ไม่ commit"""
+        chosen = [o for o in self.objects if pages is None or o.page in pages]
+        if not chosen:
+            return set()
+        objs_mod.bake_all(self.doc, chosen)
+        done = {o.page for o in chosen}
+        gone = {o.uid for o in chosen}
+        self.objects = [o for o in self.objects if o.uid not in gone]
+        return done
+
+    @contextmanager
+    def baked(self):
+        """เอกสารที่ฝังวัตถุลอยแล้ว (สำเนาชั่วคราว) สำหรับบันทึก/พิมพ์/ส่งออก"""
+        if not self.objects:
+            yield self.doc
+            return
+        tmp = pymupdf.open("pdf", self.doc.tobytes(garbage=0, deflate=False, encryption=pymupdf.PDF_ENCRYPT_NONE))
+        try:
+            objs_mod.bake_all(tmp, self.objects)
+            yield tmp
+        finally:
+            tmp.close()
+
+    # ── snapshot ──
+    def _snapshot(self, data: bytes | None = None) -> tuple[bytes, list[FloatObj]]:
+        if data is None:
+            data = self.doc.tobytes(garbage=0, deflate=False, encryption=pymupdf.PDF_ENCRYPT_NONE)
+        return data, [o.clone() for o in self.objects]
+
+    def commit(self, doc_changed: bool = True) -> None:
+        """เรียกหลังแก้ไขเสร็จ เพื่อบันทึกจุดย้อนกลับ (doc_changed=False เมื่อแก้เฉพาะวัตถุลอย → ไม่ต้องสร้างไฟล์ใหม่)"""
         self._undo.append(self._current)
         if len(self._undo) > MAX_UNDO:
             self._undo.pop(0)
         self._redo.clear()
-        self._current = self._snapshot()
+        self._current = self._snapshot(None if doc_changed else self._current[0])
         self.version += 1
         self._set_dirty(True)
         self.changed.emit()
 
-    def _restore(self, data: bytes) -> None:
+    def _load(self, snap: tuple[bytes, list[FloatObj]]) -> None:
         old = self.doc
-        self.doc = pymupdf.open("pdf", data)
+        self.doc = pymupdf.open("pdf", snap[0])
         old.close()
-        self._current = data
+        self.objects = [o.clone() for o in snap[1]]
+        self._current = snap
         self.version += 1
+
+    def _restore(self, snap: tuple[bytes, list[FloatObj]]) -> None:
+        self._load(snap)
         self._set_dirty(True)
         self.changed.emit()
 
     def revert(self) -> None:
         """ย้อนเอกสารกลับเป็นสถานะล่าสุดที่ commit (ใช้เมื่อการแก้ไขล้มเหลวกลางทาง)"""
-        old = self.doc
-        self.doc = pymupdf.open("pdf", self._current)
-        old.close()
-        self.version += 1
+        self._load(self._current)
         self.changed.emit()
 
     def undo(self) -> None:
@@ -116,9 +156,10 @@ class PdfModel(QObject):
         target = path or self.path
         if not target:
             raise ValueError("ยังไม่มีชื่อไฟล์")
-        tmp = Path(target).with_suffix(".tmp_pdfstudio")
+        tmp = Path(target).with_suffix(".tmp_pdfgovernix")
         try:
-            self.doc.save(str(tmp), garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_NONE)
+            with self.baked() as d:
+                d.save(str(tmp), garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_NONE)
             tmp.replace(target)
         finally:
             if tmp.exists():

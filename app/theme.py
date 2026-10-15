@@ -3,30 +3,48 @@ from __future__ import annotations
 
 from PySide6.QtGui import QFont, QFontDatabase
 
-BG = "#F3F5F9"
+BG = "#F5F4FB"
 SURFACE = "#FFFFFF"
 BORDER = "#E1E5ED"
 BORDER_STRONG = "#CDD3DF"
 TEXT = "#1F2533"
 MUTED = "#697386"
-ACCENT = "#3B5BDB"
-ACCENT_HOVER = "#2F4AC0"
-ACCENT_SOFT = "#E8EDFF"
-ACCENT_SOFT_2 = "#D6DEFF"
-VIEW_BG = "#DCE1EA"
+ACCENT = "#7C3AED"
+ACCENT_2 = "#6366F1"
+GRADIENT = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C3AED, stop:1 #6366F1)"
+GRADIENT_HOVER = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6D28D9, stop:1 #4F46E5)"
+ACCENT_HOVER = "#6D28D9"
+ACCENT_SOFT = "#F0EAFF"
+ACCENT_SOFT_2 = "#DDD1FB"
+VIEW_BG = "#E3E1EF"
 DANGER = "#E03131"
 ICON = "#3A4257"
 ICON_DISABLED = "#B9C0CE"
 
-UI_FONT_FAMILIES = ["Segoe UI", "Leelawadee UI", "Tahoma", "Sarabun", "Noto Sans Thai", "Loma"]
+FALLBACK_FAMILIES = ["Leelawadee UI", "Tahoma", "Segoe UI", "Sarabun", "Noto Sans Thai", "Loma"]
+
+
+def load_fonts() -> str:
+    """โหลดฟอนต์ Prompt ที่แถมมากับโปรแกรม (ไม่ต้องติดตั้งในเครื่อง) คืนชื่อ family ที่ใช้ได้"""
+    from .config import FONT_FAMILY, resource_path
+
+    d = resource_path("assets", "fonts")
+    if d.is_dir():
+        for f in sorted(d.glob("*.ttf")):
+            QFontDatabase.addApplicationFont(str(f))
+    return FONT_FAMILY if FONT_FAMILY in set(QFontDatabase.families()) else ""
 
 
 def apply_app_font(app) -> None:
+    from .config import FONT_FAMILY
+
+    prompt = load_fonts()
     available = set(QFontDatabase.families())
-    fam = [f for f in UI_FONT_FAMILIES if f in available] or [app.font().family()]
-    font = QFont(fam[0])
+    fam = ([prompt] if prompt else []) + [f for f in FALLBACK_FAMILIES if f in available]
+    font = QFont(fam[0] if fam else app.font().family())
     font.setFamilies(fam)
-    font.setPointSizeF(10.5)
+    font.setPointSizeF(10)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
 
 
@@ -46,11 +64,28 @@ def make_check_png() -> str:
     return f.as_posix()
 
 
+def make_chevron_png() -> str:
+    """ลูกศรเล็กสำหรับ dropdown (QSS ต้องใช้ไฟล์ภาพ)"""
+    from pathlib import Path
+
+    from PySide6.QtCore import QStandardPaths
+
+    import qtawesome as qta
+
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation) or str(Path.home())
+    d = Path(base)
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "chevron_down.png"
+    qta.icon("mdi6.chevron-down", color=MUTED).pixmap(16, 16).save(str(f))
+    return f.as_posix()
+
+
 def stylesheet() -> str:
     check = make_check_png()
+    chevron = make_chevron_png()
     return f"""
 * {{ outline: 0; }}
-QWidget {{ color: {TEXT}; }}
+QWidget {{ color: {TEXT}; font-family: "Prompt", "Leelawadee UI", "Tahoma"; }}
 QMainWindow, QDialog {{ background: {BG}; }}
 QToolTip {{ background: #1F2533; color: white; border: 0; padding: 5px 8px; border-radius: 6px; }}
 
@@ -77,10 +112,10 @@ QToolButton#RibbonBtn:pressed {{ background: {ACCENT_SOFT}; }}
 QToolButton#RibbonBtn:checked {{ background: {ACCENT_SOFT}; border: 1px solid {ACCENT_SOFT_2}; color: {ACCENT}; font-weight: 600; }}
 QToolButton#RibbonBtn:disabled {{ color: {ICON_DISABLED}; }}
 QToolButton#RibbonPrimary {{
-    background: {ACCENT}; color: white; border: 1px solid {ACCENT}; border-radius: 9px;
+    background: {GRADIENT}; color: white; border: 0; border-radius: 10px;
     padding: 6px 4px 3px 4px; min-width: 62px; font-size: 9.5pt; font-weight: 600;
 }}
-QToolButton#RibbonPrimary:hover {{ background: {ACCENT_HOVER}; }}
+QToolButton#RibbonPrimary:hover {{ background: {GRADIENT_HOVER}; }}
 QToolButton#RibbonPrimary:disabled {{ background: {ACCENT_SOFT_2}; border-color: {ACCENT_SOFT_2}; }}
 
 /* ───── แถบตัวเลือกของเครื่องมือ ───── */
@@ -122,8 +157,8 @@ QPushButton {{
 QPushButton:hover {{ background: {BG}; border-color: #B8C0D0; }}
 QPushButton:pressed {{ background: {ACCENT_SOFT}; }}
 QPushButton:disabled {{ color: {ICON_DISABLED}; background: {BG}; border-color: {BORDER}; }}
-QPushButton#Primary {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: white; font-weight: 600; padding: 8px 22px; }}
-QPushButton#Primary:hover {{ background: {ACCENT_HOVER}; }}
+QPushButton#Primary {{ background: {GRADIENT}; border: 0; border-radius: 10px; color: white; font-weight: 600; padding: 9px 26px; }}
+QPushButton#Primary:hover {{ background: {GRADIENT_HOVER}; }}
 QPushButton#Primary:disabled {{ background: {ACCENT_SOFT_2}; border-color: {ACCENT_SOFT_2}; color: white; }}
 QPushButton#Danger {{ color: {DANGER}; }}
 QPushButton#Link {{ border: 0; background: transparent; color: {ACCENT}; padding: 2px 6px; text-align: left; }}
@@ -136,7 +171,9 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QFontComboBox, QPlainTextEdit, Q
     selection-background-color: {ACCENT_SOFT_2}; selection-color: {TEXT};
 }}
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border: 1px solid {ACCENT}; }}
-QComboBox::drop-down {{ border: 0; width: 22px; }}
+QComboBox {{ padding-right: 4px; min-height: 20px; }}
+QComboBox::drop-down {{ border: 0; width: 26px; subcontrol-origin: padding; subcontrol-position: center right; }}
+QComboBox::down-arrow {{ image: url({chevron}); width: 16px; height: 16px; }}
 QComboBox QAbstractItemView {{ background: {SURFACE}; border: 1px solid {BORDER}; selection-background-color: {ACCENT_SOFT}; selection-color: {TEXT}; padding: 4px; }}
 QCheckBox {{ spacing: 8px; }}
 QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid {BORDER_STRONG}; background: {SURFACE}; }}
@@ -160,7 +197,7 @@ QScrollBar::handle:horizontal:hover {{ background: #8E98AC; }}
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background: none; border: 0; width: 0; height: 0; }}
 
 QSlider::groove:horizontal {{ height: 4px; background: {BORDER_STRONG}; border-radius: 2px; }}
-QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {GRADIENT}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: white; border: 2px solid {ACCENT}; width: 12px; height: 12px; margin: -7px 0; border-radius: 8px; }}
 
 QStatusBar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
@@ -171,7 +208,7 @@ QMenu::item:selected {{ background: {ACCENT_SOFT}; color: {TEXT}; }}
 QMenu::item:disabled {{ color: {ICON_DISABLED}; }}
 QMenu::separator {{ height: 1px; background: {BORDER}; margin: 5px 8px; }}
 QProgressBar {{ border: 0; background: {BORDER}; border-radius: 5px; text-align: center; min-height: 10px; max-height: 10px; }}
-QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
+QProgressBar::chunk {{ background: {GRADIENT}; border-radius: 5px; }}
 QSplitter::handle {{ background: {BORDER}; width: 1px; }}
 
 /* ───── หน้าต้อนรับ ───── */
@@ -180,9 +217,10 @@ QSplitter::handle {{ background: {BORDER}; width: 1px; }}
 #WelcomeCard[drag="true"] {{ border-color: {ACCENT}; background: {ACCENT_SOFT}; }}
 #WelcomeTitle {{ font-size: 22pt; font-weight: 700; }}
 #WelcomeSub {{ color: {MUTED}; font-size: 11pt; }}
-#BigBtn {{ background: {ACCENT}; color: white; border: 0; border-radius: 12px; padding: 12px 28px; font-size: 11.5pt; font-weight: 600; }}
-#BigBtn:hover {{ background: {ACCENT_HOVER}; }}
+#BigBtn {{ background: {GRADIENT}; color: white; border: 0; border-radius: 14px; padding: 13px 30px; font-size: 11.5pt; font-weight: 600; }}
+#BigBtn:hover {{ background: {GRADIENT_HOVER}; }}
 #BigBtnAlt {{ background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER_STRONG}; border-radius: 12px; padding: 12px 28px; font-size: 11.5pt; font-weight: 600; }}
 #BigBtnAlt:hover {{ background: {BG}; }}
 #RecentTitle {{ font-weight: 600; color: {MUTED}; }}
+#WelcomeFoot {{ color: {MUTED}; font-size: 8.5pt; padding: 6px; }}
 """

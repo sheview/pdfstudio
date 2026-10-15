@@ -4,11 +4,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-APP_NAME = "PDF Studio"
+APP_NAME = "PDF Governix"
 APP_VERSION = "1.0.0"
-ORG_NAME = ""  # ใส่ชื่อบริษัทที่นี่ ถ้าต้องการให้แสดงในหน้า "เกี่ยวกับ"
-SETTINGS_ORG = "PDFStudio"
-SETTINGS_APP = "PDFStudio"
+ORG_NAME = "Governix"
+COPYRIGHT = "© 2026 Governix. สงวนลิขสิทธิ์ (All rights reserved)"
+SETTINGS_ORG = "Governix"
+SETTINGS_APP = "PDFGovernix"
+FONT_FAMILY = "Prompt"
 
 MAX_UNDO = 20          # จำนวนขั้นตอนย้อนกลับสูงสุด
 MAX_RECENT = 10        # จำนวนไฟล์ล่าสุดที่จำไว้

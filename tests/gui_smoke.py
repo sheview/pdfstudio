@@ -37,7 +37,8 @@ class FakeTextDialog:
     class DialogCode:
         Accepted = 1
 
-    def __init__(self, parent, title, text="", style=None, sub=""):
+    def __init__(self, parent, title, text="", style=None, sub="", deletable=False):
+        self.deleted = False
         from app.textrender import TextStyle
         self._text = text or "ทดสอบใส่ข้อความ ผู้ใหญ่ น้ำ"
         self._style = style or TextStyle(size=18, color="#0B7285")

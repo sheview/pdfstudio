@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import APP_NAME, MAX_RECENT, SETTINGS_APP, SETTINGS_ORG
+from .config import APP_NAME, COPYRIGHT, MAX_RECENT, SETTINGS_APP, SETTINGS_ORG
 from .dialogs import MergeDialog, ask_password, show_about
 from .doctab import DocTab
 from .icons import icon
@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         self.pen_color = QColor(self.settings.value("pen_color", "#E03131"))
         self.pen_width = float(self.settings.value("pen_width", 2.5))
         self.text_style = self._load_text_style()
+        self.obj_clipboard = None       # วัตถุ (รูป/ข้อความ) ที่คัดลอกไว้ ใช้วางข้ามหน้า/ข้ามไฟล์
         self.doc_actions: list[QAction] = []
         self.tool_actions: dict[Tool, QAction] = {}
 
@@ -156,7 +157,14 @@ class MainWindow(QMainWindow):
         self.act_thumbs = self._act("ภาพย่อ", "page-layout-sidebar-left", self.toggle_thumbs, "F4", "แสดง/ซ่อนแผงภาพย่อ", checkable=True)
         self.act_thumbs.setChecked(True)
         # เลือก/คัดลอก
-        self.act_copy = self._act("คัดลอกข้อความ", "content-copy", self.copy, "Ctrl+C", "คัดลอกข้อความที่เลือก")
+        self.act_copy = self._act("คัดลอก", "content-copy", self.copy, "Ctrl+C", "คัดลอกข้อความ/รูป/กล่องข้อความที่เลือก")
+        self.act_paste = self._act("วาง", "content-paste", T("paste_object"), "Ctrl+V", "วางรูป/ข้อความที่คัดลอกไว้ (วางภาพจากคลิปบอร์ดได้)")
+        self.act_obj_dup = self._act("ทำสำเนา", "plus-box-multiple-outline", T("duplicate_object"), "Ctrl+D", "ทำสำเนารูป/กล่องข้อความที่เลือก")
+        self.act_obj_delete = self._act("ลบ", "delete-outline", T("delete_object"), None, "ลบรูป/กล่องข้อความที่เลือก  (Delete)")
+        self.act_obj_front = self._act("นำมาไว้หน้าสุด", "arrange-bring-to-front", lambda: self._tab_call("reorder_object")(True), None, "นำวัตถุที่เลือกมาไว้ด้านหน้าสุด")
+        self.act_obj_back = self._act("ส่งไปหลังสุด", "arrange-send-to-back", lambda: self._tab_call("reorder_object")(False), None, "ส่งวัตถุที่เลือกไปไว้ด้านหลังสุด")
+        self.act_watermark = self._act("ลายน้ำ", "water-opacity", T("add_watermark"), None, "ใส่ลายน้ำข้อความหรือรูปภาพ (ทุกหน้า/บางหน้า)")
+        self.act_obj_edit = self._act("แก้ไข", "pencil-outline", T("edit_object"), "F2", "แก้ไขข้อความของกล่องข้อความที่เลือก (ดับเบิลคลิกก็ได้)")
         self.act_select_all = self._act("เลือกทั้งหน้า", "select-all", self.select_all, "Ctrl+A", "เลือกข้อความทั้งหน้า")
         self.act_highlight_sel = self._act("ไฮไลต์ข้อความที่เลือก", "marker", lambda: self._tab_call("apply_markup_to_selection")("highlight"))
         self.act_underline_sel = self._act("ขีดเส้นใต้ข้อความที่เลือก", "format-underline", lambda: self._tab_call("apply_markup_to_selection")("underline"))
@@ -174,7 +182,7 @@ class MainWindow(QMainWindow):
         self.act_t_pen = self._tool_act(Tool.PEN, "วาดเส้น", "draw", "วาดเส้นอิสระ/เซ็นชื่อ", "P")
         self.act_t_edit = self._tool_act(Tool.EDIT_TEXT, "แก้ข้อความ", "text-box-edit-outline", "แก้ไขข้อความเดิมในเอกสาร", "E")
         self.act_t_erase = self._tool_act(Tool.ERASE, "ลบ/ปิดทับ", "eraser", "ลบเนื้อหาในกรอบ (เทสีพื้นหลัง)", "X")
-        self.act_t_redact = self._tool_act(Tool.REDACT, "ปิดข้อมูลลับ", "card-account-details-star-outline", "ลบข้อมูลถาวรและปิดด้วยแถบดำ", "R")
+        self.act_t_redact = self._tool_act(Tool.REDACT, "ปิดลับ", "card-account-details-star-outline", "ลบข้อมูลถาวรและปิดด้วยแถบดำ", "R")
         self.act_t_select.setChecked(True)
         # หน้า
         self.act_rotate_left = self._act("หมุนซ้าย", "rotate-left", lambda: self._tab_call("rotate")(-90), "Ctrl+L", "หมุนหน้าที่เลือกทวนเข็มนาฬิกา")
@@ -221,7 +229,8 @@ class MainWindow(QMainWindow):
         self.ribbon.add_tab("แก้ไข", [
             ("เครื่องมือ", [A.act_t_select, A.act_t_hand]),
             ("มาร์กอัป", [A.act_t_hl, A.act_t_ul, A.act_t_st]),
-            ("แทรก", [A.act_t_text, A.act_t_img, A.act_t_pen]),
+            ("แทรก", [A.act_t_text, A.act_t_img, A.act_t_pen, A.act_watermark]),
+            ("วัตถุที่เลือก", [A.act_obj_edit, A.act_copy, A.act_paste, A.act_obj_dup, A.act_obj_delete]),
             ("แก้ไข / ลบ", [A.act_t_edit, A.act_t_erase, A.act_t_redact]),
             ("ประวัติ", [A.act_undo, A.act_redo]),
         ])
@@ -270,6 +279,9 @@ class MainWindow(QMainWindow):
         self.msg = QLabel("พร้อมใช้งาน")
         self.msg.setStyleSheet(f"color:{MUTED}; padding-left:10px;")
         sb.addWidget(self.msg, 1)
+        self.copyright = QLabel(COPYRIGHT)
+        self.copyright.setStyleSheet(f"color:{MUTED}; font-size:8.5pt; padding-right:18px;")
+        sb.addPermanentWidget(self.copyright)
 
         box = QWidget()
         h = QHBoxLayout(box)
@@ -445,7 +457,11 @@ class MainWindow(QMainWindow):
 
     def copy(self) -> None:
         t = self.current_tab()
-        if t and t.view.copy_selection():
+        if not t:
+            return
+        if t.view.selected_object() is not None:
+            t.copy_object()
+        elif t.view.copy_selection():
             self.show_message("คัดลอกข้อความแล้ว")
 
     def select_all(self) -> None:
@@ -464,6 +480,8 @@ class MainWindow(QMainWindow):
             return
         if t.search_wrap.isVisible():
             t.close_search()
+        elif t.view.selected_object() is not None:
+            t.view.select_object(None)
         elif self.tool != Tool.SELECT or t.view.has_selection():
             t.view.clear_selection()
             self.set_tool(Tool.SELECT)
@@ -510,8 +528,13 @@ class MainWindow(QMainWindow):
         self.act_undo.setEnabled(m.can_undo())
         self.act_redo.setEnabled(m.can_redo())
         sel = v.has_selection()
-        for a in (self.act_copy, self.act_highlight_sel, self.act_underline_sel, self.act_strike_sel):
+        obj = v.selected_object()
+        for a in (self.act_highlight_sel, self.act_underline_sel, self.act_strike_sel):
             a.setEnabled(sel)
+        self.act_copy.setEnabled(sel or obj is not None)
+        for a in (self.act_obj_dup, self.act_obj_delete, self.act_obj_front, self.act_obj_back):
+            a.setEnabled(obj is not None)
+        self.act_obj_edit.setEnabled(obj is not None and obj.is_text)
         self.act_save.setEnabled(True)
         sp = self.page_spin
         sp.setEnabled(True)

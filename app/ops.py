@@ -184,12 +184,36 @@ def add_text(page: pymupdf.Page, rect_vis: pymupdf.Rect, text: str, style: TextS
     return vis
 
 
-def _overlay_pdf(page: pymupdf.Page, rect_vis: pymupdf.Rect, pdf_bytes: bytes) -> None:
+def _overlay_pdf(page: pymupdf.Page, rect_vis: pymupdf.Rect, pdf_bytes: bytes, overlay: bool = True) -> None:
     src = pymupdf.open("pdf", pdf_bytes)
     try:
-        page.show_pdf_page(vis_to_unrot_rect(page, rect_vis), src, 0, rotate=page.rotation, overlay=True)
+        page.show_pdf_page(vis_to_unrot_rect(page, rect_vis), src, 0, rotate=page.rotation, overlay=overlay)
     finally:
         src.close()
+
+
+def add_watermark(doc: pymupdf.Document, pages: list[int], *, text: str = "", style: TextStyle | None = None,
+                  image: bytes | None = None, opacity: float = 0.25, angle: float = 45.0, tile: bool = False,
+                  img_frac: float = 0.5, behind: bool = False) -> None:
+    """ใส่ลายน้ำ (ข้อความหรือรูป) ลงหน้าที่ระบุ — โปร่งแสง หมุนได้ วางกลางหน้าหรือซ้ำทั่วหน้า"""
+    from PySide6.QtGui import QImage
+
+    from .textrender import render_watermark_pdf
+
+    img = QImage.fromData(image) if image else None
+    if image and (img is None or img.isNull()):
+        raise ValueError("อ่านไฟล์รูปภาพลายน้ำไม่ได้")
+    if img is None and not text.strip():
+        raise ValueError("ยังไม่ได้ใส่ข้อความลายน้ำ")
+    cache: dict[tuple[float, float], bytes] = {}
+    for pno in pages:
+        page = doc[pno]
+        r = page.rect
+        key = (round(r.width, 1), round(r.height, 1))
+        if key not in cache:
+            cache[key] = render_watermark_pdf(r.width, r.height, text=text, style=style, image=img,
+                                              opacity=opacity, angle=angle, tile=tile, img_frac=img_frac)
+        _overlay_pdf(page, r, cache[key], overlay=not behind)
 
 
 def add_image(page: pymupdf.Page, rect_vis: pymupdf.Rect, path: str, keep_proportion: bool = True) -> None:

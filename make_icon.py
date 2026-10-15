@@ -7,8 +7,8 @@ OUT.mkdir(exist_ok=True)
 S = 512
 img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
 d = ImageDraw.Draw(img)
-d.rounded_rectangle((16, 16, S - 16, S - 16), radius=110, fill=(59, 91, 219, 255))
-d.polygon([(S - 150, 16), (S - 16, 150), (S - 150, 150)], fill=(40, 66, 180, 255))
+d.rounded_rectangle((16, 16, S - 16, S - 16), radius=110, fill=(124, 58, 237, 255))
+d.polygon([(S - 150, 16), (S - 16, 150), (S - 150, 150)], fill=(99, 102, 241, 255))
 font = None
 for f in ("arialbd.ttf", "DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
     try:
