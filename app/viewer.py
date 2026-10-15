@@ -219,7 +219,7 @@ class PdfView(QScrollArea):
     fitModeChanged = Signal(str)
     objectsChanged = Signal(list)          # รายการหน้าที่วัตถุลอยเปลี่ยน (ย้าย/ย่อขยายเสร็จ)
     objectEditRequested = Signal(int)      # ดับเบิลคลิกกล่องข้อความ
-    objectDeleteRequested = Signal(int)
+    objectDeleteRequested = Signal(list)
     objectContextRequested = Signal(QPoint, int)
     objectSelectionChanged = Signal()
 
@@ -265,7 +265,9 @@ class PdfView(QScrollArea):
 
         # วัตถุลอย (รูป/ข้อความ)
         self.get_objects = lambda: []
-        self.selected_uid: int | None = None
+        self.selected_uids: list[int] = []     # วัตถุที่เลือก (เลือกได้หลายชิ้น) — ตัวท้ายคือชิ้นหลัก
+        self._marq: QRectF | None = None       # กรอบลากเลือกหลายวัตถุ (พิกัด canvas)
+        self._marq_add = False
         self._od: dict | None = None
         self._nudge_pages: set[int] = set()
         self._nudge_timer = QTimer(self)
@@ -593,6 +595,11 @@ class PdfView(QScrollArea):
                 p.drawText(r, Qt.AlignmentFlag.AlignCenter, "กำลังโหลด…")
             self._paint_objects(p, i, r)
             self._paint_overlays(p, i, r)
+        if self._marq is not None:
+            col = QColor(ACCENT)
+            p.setBrush(QColor(col.red(), col.green(), col.blue(), 30))
+            p.setPen(QPen(col, 1.2, Qt.PenStyle.DashLine))
+            p.drawRect(self._marq)
 
     def _scale(self, i: int) -> float:
         return self.page_rects[i].width() / self.sizes[i][0]
@@ -602,14 +609,31 @@ class PdfView(QScrollArea):
         return QRectF(pr.left() + r.left() * s, pr.top() + r.top() * s, r.width() * s, r.height() * s)
 
     # ───────── วัตถุลอย ─────────
-    def selected_object(self) -> FloatObj | None:
-        if self.selected_uid is None:
-            return None
-        return next((o for o in self.get_objects() if o.uid == self.selected_uid), None)
+    @property
+    def selected_uid(self) -> int | None:
+        return self.selected_uids[-1] if self.selected_uids else None
 
-    def select_object(self, uid: int | None) -> None:
-        if uid != self.selected_uid:
-            self.selected_uid = uid
+    def selected_objects(self) -> list[FloatObj]:
+        want = set(self.selected_uids)
+        return [o for o in self.get_objects() if o.uid in want]
+
+    def selected_object(self) -> FloatObj | None:
+        """วัตถุที่เลือกเมื่อเลือกอยู่ชิ้นเดียว (ไม่งั้น None)"""
+        sel = self.selected_objects()
+        return sel[0] if len(sel) == 1 else None
+
+    def select_object(self, uid: int | None, add: bool = False) -> None:
+        self.select_objects([] if uid is None else [uid], add)
+
+    def select_objects(self, uids: list[int], add: bool = False) -> None:
+        cur = list(self.selected_uids) if add else []
+        for u in uids:
+            if add and u in cur:
+                cur.remove(u)          # Ctrl/Shift + คลิกซ้ำ = เอาออกจากที่เลือก
+            else:
+                cur.append(u)
+        if cur != self.selected_uids:
+            self.selected_uids = cur
             self.canvas.update()
             self.objectSelectionChanged.emit()
 
@@ -666,33 +690,37 @@ class PdfView(QScrollArea):
             except Exception:
                 p.setPen(QPen(QColor("#E03131"), 1))
                 p.drawRect(r)
-        sel = self.selected_object()
-        if sel is not None and sel.page == i:
+        sels = [o for o in self.selected_objects() if o.page == i]
+        single = len(self.selected_uids) == 1
+        col = QColor(ACCENT)
+        for sel in sels:
             r = self._obj_rect(sel)
             if r is None:
-                return
-            col = QColor(ACCENT)
+                continue
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(col, 1.4))
+            p.setPen(QPen(col, 1.4, Qt.PenStyle.SolidLine if single else Qt.PenStyle.DashLine))
             p.drawRect(r)
-            p.setBrush(QColor("white"))
-            p.setPen(QPen(col, 1.6))
-            h = HANDLE_PX
-            for pt in self._handle_points(r, sel.is_text).values():
-                p.drawRoundedRect(QRectF(pt.x() - h / 2, pt.y() - h / 2, h, h), 2.5, 2.5)
-
+            if single:
+                p.setBrush(QColor("white"))
+                p.setPen(QPen(col, 1.6))
+                h = HANDLE_PX
+                for pt in self._handle_points(r, sel.is_text).values():
+                    p.drawRoundedRect(QRectF(pt.x() - h / 2, pt.y() - h / 2, h, h), 2.5, 2.5)
     def _begin_obj_drag(self, o: FloatObj, mode: str, pos: QPointF) -> None:
         loc = self._locate(pos, prefer=o.page)
         if loc is None:
             return
         pt = loc[1]
+        group = self.selected_objects() if mode == "move" else [o]
         self._od = {
             "uid": o.uid, "mode": mode, "orig": o.rect(), "size": o.style.size,
             "orig_page": o.page, "grab": (pt.x() - o.x, pt.y() - o.y), "moved": False, "origin": pos,
+            "group": {g.uid: (g.x, g.y, g.page) for g in group},
         }
         self.canvas.setCursor(QCursor(HANDLE_CURSORS.get(mode, Qt.CursorShape.SizeAllCursor)))
 
-    def _press_object(self, pos: QPointF) -> bool:
+    def _press_object(self, pos: QPointF, mods=Qt.KeyboardModifier.NoModifier) -> bool:
+        multi = bool(mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
         sel = self.selected_object()
         if sel is not None:
             h = self._hit_handle(sel, pos)
@@ -702,10 +730,22 @@ class PdfView(QScrollArea):
         o = self._hit_object(pos)
         if o is not None:
             self.clear_selection()
-            self.select_object(o.uid)
+            if multi:
+                self.select_object(o.uid, add=True)      # Ctrl/Shift+คลิก = เพิ่ม/เอาออกจากที่เลือก
+                if o.uid in self.selected_uids:
+                    self._begin_obj_drag(o, "move", pos)
+                return True
+            if o.uid not in self.selected_uids:
+                self.select_object(o.uid)
             self._begin_obj_drag(o, "move", pos)
             return True
-        if sel is not None:
+        if multi:                                         # Ctrl/Shift+ลากบนที่ว่าง = ลากกรอบเลือกหลายชิ้น
+            self._marq = QRectF(pos, pos)
+            self._marq_add = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+            self._marq_origin = pos
+            self.clear_selection()
+            return True
+        if self.selected_uids:
             self.select_object(None)
         return False
 
@@ -719,15 +759,27 @@ class PdfView(QScrollArea):
             return                      # ขยับเล็กน้อยยังไม่ถือว่าลาก (กันมือสั่นตอนคลิก)
         od["moved"] = True
         if od["mode"] == "move":
-            loc = self._locate(pos)
-            if loc is None:
-                return
-            j, pt = loc
-            o.page = j
-            pw, ph = self.sizes[j]
-            gx, gy = od["grab"]
-            o.x = min(max(pt.x() - gx, -(o.w - 20)), pw - 20)
-            o.y = min(max(pt.y() - gy, -(o.h - 20)), ph - 20)
+            group = od["group"]
+            if len(group) == 1:         # ชิ้นเดียว → ลากข้ามหน้าได้
+                loc = self._locate(pos)
+                if loc is None:
+                    return
+                j, pt = loc
+                o.page = j
+                pw, ph = self.sizes[j]
+                gx, gy = od["grab"]
+                o.x = min(max(pt.x() - gx, -(o.w - 20)), pw - 20)
+                o.y = min(max(pt.y() - gy, -(o.h - 20)), ph - 20)
+            else:                       # หลายชิ้น → ขยับพร้อมกันด้วยระยะเท่ากัน
+                s0 = self._scale(od["orig_page"])
+                dx, dy = (pos.x() - od["origin"].x()) / s0, (pos.y() - od["origin"].y()) / s0
+                for g in self.selected_objects():
+                    x0, y0, pg = group.get(g.uid, (g.x, g.y, g.page))
+                    if not (0 <= pg < len(self.sizes)):
+                        continue
+                    pw, ph = self.sizes[pg]
+                    g.x = min(max(x0 + dx, -(g.w - 20)), pw - 20)
+                    g.y = min(max(y0 + dy, -(g.h - 20)), ph - 20)
         else:
             loc = self._locate(pos, prefer=o.page)
             if loc is None:
@@ -781,8 +833,8 @@ class PdfView(QScrollArea):
         od, self._od = self._od, None
         self._apply_cursor()
         if od and od["moved"]:
-            o = next((q for q in self.get_objects() if q.uid == od["uid"]), None)
-            pages = {od["orig_page"]} | ({o.page} if o else set())
+            pages = {od["orig_page"]} | {pg for (_, _, pg) in od["group"].values()}
+            pages |= {o.page for o in self.selected_objects()}
             self.objectsChanged.emit(sorted(pages))
 
     def _hover(self, pos: QPointF) -> None:
@@ -802,12 +854,13 @@ class PdfView(QScrollArea):
             self.canvas.setCursor(QCursor(cur))
 
     def nudge_selected(self, dx: float, dy: float) -> None:
-        o = self.selected_object()
-        if o is None:
+        sel = self.selected_objects()
+        if not sel:
             return
-        o.x += dx
-        o.y += dy
-        self._nudge_pages.add(o.page)
+        for o in sel:
+            o.x += dx
+            o.y += dy
+            self._nudge_pages.add(o.page)
         self._nudge_timer.start()
         self.canvas.update()
 
@@ -817,12 +870,12 @@ class PdfView(QScrollArea):
             self.objectsChanged.emit(pages)
 
     def keyPressEvent(self, ev):  # noqa: N802
-        o = self.selected_object()
-        if o is not None:
+        sel = self.selected_objects()
+        if sel:
             k = ev.key()
             step = 10.0 if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
             if k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-                self.objectDeleteRequested.emit(o.uid)
+                self.objectDeleteRequested.emit([o.uid for o in sel])
                 return
             moves = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0),
                      Qt.Key.Key_Up: (0, -step), Qt.Key.Key_Down: (0, step)}
@@ -830,6 +883,11 @@ class PdfView(QScrollArea):
                 self.nudge_selected(*moves[k])
                 return
         super().keyPressEvent(ev)
+
+    def select_all_objects(self, page: int | None = None) -> None:
+        objs = [o for o in self.get_objects() if page is None or o.page == page]
+        self.clear_selection()
+        self.select_objects([o.uid for o in objs])
 
     def _paint_overlays(self, p: QPainter, i: int, pr: QRectF) -> None:
         p.setPen(Qt.PenStyle.NoPen)
@@ -891,6 +949,7 @@ class PdfView(QScrollArea):
             self.clear_selection()
         if tool not in OBJ_TOOLS:
             self.select_object(None)
+            self._marq = None
         self._apply_cursor()
 
     def _apply_cursor(self) -> None:
@@ -914,7 +973,7 @@ class PdfView(QScrollArea):
             self._pan_origin = ev.globalPosition().toPoint()
             self.canvas.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             return
-        if self.tool in OBJ_TOOLS and self._press_object(pos):
+        if self.tool in OBJ_TOOLS and self._press_object(pos, ev.modifiers()):
             return
         loc = self._locate(pos)
         if loc is None:
@@ -941,6 +1000,10 @@ class PdfView(QScrollArea):
             return
         if self._od is not None:
             self._obj_drag_move(ev)
+            return
+        if self._marq is not None:
+            self._marq = QRectF(self._marq_origin, ev.position()).normalized()
+            self.canvas.update()
             return
         if self._drag_page is None:
             self._hover(ev.position())
@@ -978,6 +1041,17 @@ class PdfView(QScrollArea):
             return
         if self._od is not None:
             self._finish_obj_drag()
+            return
+        if self._marq is not None:
+            m, self._marq = self._marq, None
+            hit = [o.uid for o in self.get_objects()
+                   if (r := self._obj_rect(o)) is not None and r.intersects(m)]
+            if self._marq_add:
+                hit = [u for u in hit if u not in self.selected_uids]
+                self.select_objects(hit, add=True)
+            else:
+                self.select_objects(hit)
+            self.canvas.update()
             return
         i = self._drag_page
         if i is None:
@@ -1057,7 +1131,8 @@ class PdfView(QScrollArea):
             o = self._hit_object(QPointF(ev.pos()))
             if o is not None:
                 self.clear_selection()
-                self.select_object(o.uid)
+                if o.uid not in self.selected_uids:
+                    self.select_object(o.uid)
                 self.objectContextRequested.emit(ev.globalPos(), o.uid)
                 return
         loc = self._locate(QPointF(ev.pos()))

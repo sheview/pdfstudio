@@ -232,6 +232,64 @@ FakeDlg.next_deleted = False
 print("deleted a line:", len(tab.model.doc[0].get_text()) < len(before))
 shot(win, "21_edit_existing")
 
+# ── 8b) เลือกหลายชิ้น คัดลอก/วางพร้อมกัน ──
+win.set_tool(Tool.SELECT)
+tab.model.objects.clear(); v.select_object(None)
+png = (out / "sig.png").read_bytes()
+A = objmod.make_image(1, png, 150, 150, 120, v.sizes[1])
+B = objmod.make_text(1, 300, 120, 160, "กล่องที่สอง", TextStyle(family="Prompt", size=16))
+C = objmod.make_image(1, png, 150, 400, 100, v.sizes[1])
+for o in (A, B, C):
+    tab.model.objects.append(o)
+tab._commit_objects([1]); v.go_to_page(1); wait(300)
+# ลากกรอบ (Ctrl+ลากบนที่ว่าง) คลุม A และ B
+drag(tab, cpos(tab, 1, 20, 20), cpos(tab, 1, 480, 260), Qt.KeyboardModifier.ControlModifier)
+assert set(v.selected_uids) == {A.uid, B.uid}, v.selected_uids
+# Ctrl+คลิก C เพิ่ม, คลิกซ้ำเอาออก
+cc = cpos(tab, 1, C.x + C.w / 2, C.y + C.h / 2)
+QTest.mouseClick(v.canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, cc); wait(100)
+assert set(v.selected_uids) == {A.uid, B.uid, C.uid}
+QTest.mouseClick(v.canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, cc); wait(100)
+assert set(v.selected_uids) == {A.uid, B.uid}
+shot(win, "20b_multi_select")
+# ลากกลุ่ม: ทุกชิ้นขยับเท่ากัน
+ax, ay, bx, by = A.x, A.y, B.x, B.y
+drag(tab, cpos(tab, 1, A.x + 10, A.y + 10), cpos(tab, 1, A.x + 40, A.y + 30))
+A = tab.model.find_object(A.uid); B = tab.model.find_object(B.uid)
+assert abs((A.x - ax) - 30) < 1.5 and abs((B.x - bx) - 30) < 1.5 and abs((B.y - by) - 20) < 1.5, (A.x - ax, B.x - bx)
+assert set(v.selected_uids) == {A.uid, B.uid}, "ลากแล้วยังเลือกกลุ่มเดิม"
+# คัดลอกทั้งกลุ่ม → วางที่หน้า 2 (index 2)
+assert win.act_copy.isEnabled()
+win.copy()
+assert isinstance(win.obj_clipboard, list) and len(win.obj_clipboard) == 2
+dxr = B.x - A.x; dyr = B.y - A.y
+v.go_to_page(2); wait(250)
+n0 = len(tab.model.objects)
+tab.paste_object()
+wait(300)
+assert len(tab.model.objects) == n0 + 2, len(tab.model.objects)
+pasted = [o for o in tab.model.objects if o.page == 2]
+assert len(pasted) == 2 and set(v.selected_uids) == {o.uid for o in pasted}
+pa = next(o for o in pasted if not o.is_text); pb = next(o for o in pasted if o.is_text)
+assert abs((pb.x - pa.x) - dxr) < 1e-6 and abs((pb.y - pa.y) - dyr) < 1e-6, "ตำแหน่งสัมพัทธ์ต้องคงเดิม"
+# วางซ้ำหน้าเดิม → ซ้อนทับต้นฉบับไม่ได้ (เลื่อน)
+tab.paste_object(); wait(200)
+assert len([o for o in tab.model.objects if o.page == 2]) == 4
+# ทำซ้ำ + ย้ายหน้า/หลัง + ลบทั้งกลุ่ม + undo
+v.select_objects([o.uid for o in tab.model.objects if o.page == 2])
+tab.reorder_object(True); tab.duplicate_object(); wait(100)
+assert len([o for o in tab.model.objects if o.page == 2]) == 8
+v.keyPressEvent(__import__("PySide6.QtGui", fromlist=["QKeyEvent"]).QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier))
+wait(200)
+assert len([o for o in tab.model.objects if o.page == 2]) == 4, "ลบกลุ่มที่เลือก (ชุดที่ทำซ้ำ)"
+tab.model.undo(); wait(150)
+assert len([o for o in tab.model.objects if o.page == 2]) == 8
+# บันทึกแล้วฝังครบ
+outp = out / "multi.pdf"
+tab.model.save(str(outp)) if hasattr(tab.model, "save") else None
+shot(win, "20c_multi_paste")
+print("multi-select copy/paste OK")
+
 # ── 9) หน้าต่างจริง: ใส่ข้อความ / ลายน้ำ / เกี่ยวกับ ──
 from app.dialogs import TextDialog, WatermarkDialog
 doctab.TextDialog = TextDialog

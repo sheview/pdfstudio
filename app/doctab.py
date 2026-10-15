@@ -420,14 +420,21 @@ class DocTab(QWidget):
     def selected_object(self) -> objmod.FloatObj | None:
         return self.view.selected_object()
 
-    def delete_object(self, uid: int | None = None) -> None:
-        o = self.model.find_object(uid) if uid is not None else self.selected_object()
-        if o is None:
+    def selected_objects(self) -> list[objmod.FloatObj]:
+        return self.view.selected_objects()
+
+    def delete_object(self, uids=None) -> None:
+        if isinstance(uids, int):
+            uids = [uids]
+        objs = [q for q in (self.model.find_object(u) for u in uids) if q is not None] if uids else self.selected_objects()
+        if not objs:
             return
-        self.model.objects = [q for q in self.model.objects if q.uid != o.uid]
+        gone = {o.uid for o in objs}
+        self.model.objects = [q for q in self.model.objects if q.uid not in gone]
         self.view.select_object(None)
-        self._commit_objects([o.page])
-        self.message.emit("ลบแล้ว (กด Ctrl+Z เพื่อย้อนกลับ)")
+        self._commit_objects(sorted({o.page for o in objs}))
+        self.message.emit(f"ลบ {len(objs)} รายการแล้ว (กด Ctrl+Z เพื่อย้อนกลับ)" if len(objs) > 1
+                          else "ลบแล้ว (กด Ctrl+Z เพื่อย้อนกลับ)")
 
     def edit_object(self, uid: int | None = None) -> None:
         o = self.model.find_object(uid) if uid is not None else self.selected_object()
@@ -454,29 +461,32 @@ class DocTab(QWidget):
         return c
 
     def duplicate_object(self) -> None:
-        o = self.selected_object()
-        if o is None:
+        objs = self.selected_objects()
+        if not objs:
             return
-        c = self._clone_near(o)
-        self.model.objects.append(c)
-        self._commit_objects([c.page])
-        self.view.select_object(c.uid)
+        new = [self._clone_near(o) for o in objs]
+        self.model.objects.extend(new)
+        self._commit_objects(sorted({c.page for c in new}))
+        self.view.select_objects([c.uid for c in new])
 
     def copy_object(self) -> bool:
-        o = self.selected_object()
-        if o is None:
+        objs = self.selected_objects()
+        if not objs:
             return False
-        self.win.obj_clipboard = o.clone()
+        self.win.obj_clipboard = [o.clone() for o in objs]
         md = QMimeData()
-        md.setData(self.OBJ_MIME, str(o.uid).encode())
-        if o.is_text:
-            md.setText(o.text)
+        md.setData(self.OBJ_MIME, ",".join(str(o.uid) for o in objs).encode())
+        first = objs[0]
+        if len(objs) == 1 and first.is_text:
+            md.setText(first.text)
         else:
-            img = QImage.fromData(o.data)
+            img_obj = next((o for o in objs if not o.is_text), None)
+            img = QImage.fromData(img_obj.data) if img_obj else QImage()
             if not img.isNull():
                 md.setImageData(img)
         QGuiApplication.clipboard().setMimeData(md)
-        self.message.emit("คัดลอกแล้ว — กด Ctrl+V เพื่อวาง")
+        self.message.emit(f"คัดลอก {len(objs)} รายการแล้ว — กด Ctrl+V เพื่อวาง" if len(objs) > 1
+                          else "คัดลอกแล้ว — กด Ctrl+V เพื่อวาง")
         return True
 
     def paste_object(self) -> None:
@@ -484,43 +494,63 @@ class DocTab(QWidget):
         pw, ph = self.view.sizes[page]
         md = QGuiApplication.clipboard().mimeData()
         src = self.win.obj_clipboard
-        new: objmod.FloatObj | None = None
-        if md is not None and src is not None and md.hasFormat(self.OBJ_MIME) \
-                and bytes(md.data(self.OBJ_MIME)).decode() == str(src.uid):
-            new = src.clone(new_uid=True)
-            new.page = page
-        elif md is not None and md.hasImage():
-            img = QGuiApplication.clipboard().image()
-            if not img.isNull():
-                buf = QBuffer()
-                buf.open(QIODevice.OpenModeFlag.WriteOnly)
-                img.save(buf, "PNG")
-                new = objmod.make_image(page, bytes(buf.data()), 0, 0, min(220.0, pw * 0.4), (pw, ph))
-        elif md is not None and md.hasText() and md.text().strip():
-            new = objmod.make_text(page, 0, 0, min(300.0, pw * 0.6), md.text().strip(), self.win.text_style_copy())
-        if new is None:
+        if isinstance(src, objmod.FloatObj):
+            src = [src]
+        new: list[objmod.FloatObj] = []
+        if md is not None and src and md.hasFormat(self.OBJ_MIME) \
+                and bytes(md.data(self.OBJ_MIME)).decode() == ",".join(str(o.uid) for o in src):
+            new = [o.clone(new_uid=True) for o in src]
+            # จัดกลุ่มให้อยู่กึ่งกลางส่วนที่มองเห็น โดยคงตำแหน่งสัมพัทธ์ของแต่ละชิ้นไว้
+            x0, y0 = min(o.x for o in new), min(o.y for o in new)
+            x1, y1 = max(o.x + o.w for o in new), max(o.y + o.h for o in new)
+            c = self.view.visible_center(page)
+            dx = c.x() - (x0 + x1) / 2
+            dy = c.y() - (y0 + y1) / 2
+            dx = min(max(dx, -x0), max(pw - x1, -x0))
+            dy = min(max(dy, -y0), max(ph - y1, -y0))
+            if any(o.page == page for o in src) and abs(x0 + dx - min(o.x for o in src)) < 6 \
+                    and abs(y0 + dy - min(o.y for o in src)) < 6:
+                dx, dy = dx + 14, dy + 14
+                dx = min(dx, max(pw - x1, 0.0))
+                dy = min(dy, max(ph - y1, 0.0))
+            for o in new:
+                o.page = page
+                o.x += dx
+                o.y += dy
+        else:
+            o = None
+            if md is not None and md.hasImage():
+                img = QGuiApplication.clipboard().image()
+                if not img.isNull():
+                    buf = QBuffer()
+                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                    img.save(buf, "PNG")
+                    o = objmod.make_image(page, bytes(buf.data()), 0, 0, min(220.0, pw * 0.4), (pw, ph))
+            elif md is not None and md.hasText() and md.text().strip():
+                o = objmod.make_text(page, 0, 0, min(300.0, pw * 0.6), md.text().strip(), self.win.text_style_copy())
+            if o is not None:
+                c = self.view.visible_center(page)
+                o.x = min(max(c.x() - o.w / 2, 0.0), max(pw - o.w, 0.0))
+                o.y = min(max(c.y() - o.h / 2, 0.0), max(ph - o.h, 0.0))
+                new = [o]
+        if not new:
             self.message.emit("ไม่มีรูปหรือข้อความในคลิปบอร์ดให้วาง")
             return
-        c = self.view.visible_center(page)
-        new.x = min(max(c.x() - new.w / 2, 0.0), max(pw - new.w, 0.0))
-        new.y = min(max(c.y() - new.h / 2, 0.0), max(ph - new.h, 0.0))
-        if src is not None and new.page == src.page and abs(new.x - src.x) < 6 and abs(new.y - src.y) < 6:
-            new.x = min(new.x + 14, max(pw - new.w, 0.0))
-            new.y = min(new.y + 14, max(ph - new.h, 0.0))
-        self.model.objects.append(new)
+        self.model.objects.extend(new)
         self._commit_objects([page])
-        self.view.select_object(new.uid)
+        self.view.select_objects([o.uid for o in new])
+        if len(new) > 1:
+            self.message.emit(f"วาง {len(new)} รายการแล้ว")
 
     def reorder_object(self, front: bool) -> None:
-        o = self.selected_object()
-        if o is None:
+        objs = self.selected_objects()
+        if not objs:
             return
-        self.model.objects = [q for q in self.model.objects if q.uid != o.uid]
-        if front:
-            self.model.objects.append(o)
-        else:
-            self.model.objects.insert(0, o)
-        self._commit_objects([o.page])
+        gone = {o.uid for o in objs}
+        rest = [q for q in self.model.objects if q.uid not in gone]
+        moved = [q for q in self.model.objects if q.uid in gone]      # คงลำดับซ้อนกันเดิมในกลุ่ม
+        self.model.objects = rest + moved if front else moved + rest
+        self._commit_objects(sorted({o.page for o in objs}))
 
     def _object_menu(self, pos, uid: int) -> None:
         w = self.win
@@ -528,7 +558,7 @@ class DocTab(QWidget):
         if o is None:
             return
         m = QMenu(self)
-        if o.is_text:
+        if o.is_text and len(self.selected_objects()) <= 1:
             m.addAction("แก้ไขข้อความ…", lambda: self.edit_object(uid))
             m.addSeparator()
         for a in (w.act_copy, w.act_paste, w.act_obj_dup, w.act_obj_front, w.act_obj_back):

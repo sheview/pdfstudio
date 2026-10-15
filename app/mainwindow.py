@@ -504,15 +504,20 @@ class MainWindow(QMainWindow):
         t = self.current_tab()
         if not t:
             return
-        if t.view.selected_object() is not None:
+        if t.view.selected_objects():
             t.copy_object()
         elif t.view.copy_selection():
             self.show_message("คัดลอกข้อความแล้ว")
 
     def select_all(self) -> None:
         t = self.current_tab()
-        if t:
-            t.view.select_all_current()
+        if not t:
+            return
+        if self.tool in (Tool.SELECT, Tool.TEXT, Tool.IMAGE, Tool.EDIT_TEXT) and any(
+                o.page == t.view.current_page for o in t.model.objects) and not t.view.has_selection():
+            t.view.select_all_objects(t.view.current_page)      # มีวัตถุลอยในหน้านี้ → เลือกทั้งหมด
+            return
+        t.view.select_all_current()
 
     def toggle_thumbs(self) -> None:
         on = self.act_thumbs.isChecked()
@@ -525,7 +530,7 @@ class MainWindow(QMainWindow):
             return
         if t.search_wrap.isVisible():
             t.close_search()
-        elif t.view.selected_object() is not None:
+        elif t.view.selected_objects():
             t.view.select_object(None)
         elif self.tool != Tool.SELECT or t.view.has_selection():
             t.view.clear_selection()
@@ -574,11 +579,12 @@ class MainWindow(QMainWindow):
         self.act_redo.setEnabled(m.can_redo())
         sel = v.has_selection()
         obj = v.selected_object()
+        objs = v.selected_objects()
         for a in (self.act_highlight_sel, self.act_underline_sel, self.act_strike_sel):
             a.setEnabled(sel)
-        self.act_copy.setEnabled(sel or obj is not None)
+        self.act_copy.setEnabled(sel or bool(objs))
         for a in (self.act_obj_dup, self.act_obj_delete, self.act_obj_front, self.act_obj_back):
-            a.setEnabled(obj is not None)
+            a.setEnabled(bool(objs))
         self.act_obj_edit.setEnabled(obj is not None and obj.is_text)
         self.act_save.setEnabled(True)
         sp = self.page_spin
