@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Callable
 
 import pymupdf
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QImage, QPageLayout, QPainter
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrintPreviewDialog
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
@@ -12,10 +12,14 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 from .config import PRINT_DPI
 
 
+SAFE_PRINT_DPI = 200      # 200 dpi พอสำหรับงานเอกสาร และเบากว่ามากสำหรับไดรเวอร์/สปูลเลอร์ของ Windows
+
+
 def _page_image(page: pymupdf.Page, dpi: int) -> QImage:
     s = dpi / 72.0
     pix = page.get_pixmap(matrix=pymupdf.Matrix(s, s), alpha=False)
-    return QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+    img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+    return img.convertToFormat(QImage.Format.Format_RGB32)       # รูปแบบที่ GDI ของ Windows ใช้ตรง ๆ ไม่ต้องแปลงซ้ำ
 
 
 def _orientation_for(page: pymupdf.Page) -> QPageLayout.Orientation:
@@ -30,36 +34,50 @@ def paint_pages(
     dpi: int | None = None,
     progress: Callable[[int, int], bool] | None = None,
 ) -> None:
-    """วาดหน้าที่เลือกลง printer (ปรับให้พอดีพื้นที่พิมพ์ และหมุนกระดาษตามแนวหน้า)"""
+    """วาดหน้าที่เลือกลง printer
+
+    ตั้งแนวกระดาษ "ครั้งเดียว" ก่อนเริ่มงาน (การสลับแนวกลางงานทำให้สปูลเลอร์ของ Windows ค้างได้)
+    หน้าที่แนวไม่ตรงกับกระดาษจะถูกหมุน 90° ตอนวาดแทน
+    """
     if not pages:
         return
-    dpi = dpi or min(PRINT_DPI, max(printer.resolution(), 96))
-    # ตั้งแนวกระดาษของหน้าแรกก่อนเริ่มวาด
+    dpi = dpi or min(SAFE_PRINT_DPI, PRINT_DPI)
     want = _orientation_for(doc[pages[0]])
     if printer.pageLayout().orientation() != want:
         printer.setPageOrientation(want)
     painter = QPainter()
     if not painter.begin(printer):
-        raise RuntimeError("เริ่มพิมพ์ไม่ได้ — ตรวจสอบเครื่องพิมพ์")
+        raise RuntimeError("เริ่มพิมพ์ไม่ได้ — ตรวจสอบว่าเครื่องพิมพ์เปิดอยู่/ไม่ถูกหยุดชั่วคราว")
+    cancelled = False
     try:
+        area0 = printer.pageLayout().paintRectPixels(printer.resolution())
+        aw, ah = float(area0.width()), float(area0.height())
         for n, pno in enumerate(pages):
             page = doc[pno]
-            if n > 0:
-                want = _orientation_for(page)
-                if printer.pageLayout().orientation() != want:
-                    printer.setPageOrientation(want)  # มีผลกับหน้าถัดไปที่ newPage()
-                printer.newPage()
             if progress and progress(n, len(pages)) is False:
+                cancelled = True
                 break
+            if n > 0:
+                printer.newPage()
             r = page.rect
-            area = printer.pageLayout().paintRectPixels(printer.resolution())
-            area = QRectF(0, 0, area.width(), area.height())
-            scale = min(area.width() / r.width, area.height() / r.height)
+            rotate = (r.width > r.height) != (aw > ah)
+            fw, fh = (ah, aw) if rotate else (aw, ah)           # ขนาดพื้นที่หลังหมุน
+            scale = min(fw / r.width, fh / r.height)
             w, h = r.width * scale, r.height * scale
-            target = QRectF(area.x() + (area.width() - w) / 2, area.y() + (area.height() - h) / 2, w, h)
-            painter.drawImage(target, _page_image(page, dpi))
+            painter.save()
+            painter.translate(aw / 2, ah / 2)
+            if rotate:
+                painter.rotate(90)
+            painter.drawImage(QRectF(-w / 2, -h / 2, w, h), _page_image(page, dpi))
+            painter.restore()
+            QApplication.processEvents()
     finally:
         painter.end()
+    if cancelled:
+        try:
+            printer.abort()
+        except Exception:
+            pass
 
 
 def pages_from_printer(printer: QPrinter, total: int, current: int) -> list[int]:
@@ -101,10 +119,15 @@ def print_document(parent, doc: pymupdf.Document, current: int, title: str = "")
 
 def run_print(parent, printer: QPrinter, doc: pymupdf.Document, current: int) -> bool:
     pages = expand_copies(printer, pages_from_printer(printer, doc.page_count, current))
-    prog = QProgressDialog("กำลังส่งงานพิมพ์…", "ยกเลิก", 0, len(pages), parent)
+    prog = QProgressDialog("กำลังเตรียมงานพิมพ์…", "ยกเลิก", 0, len(pages), parent)
     prog.setWindowTitle("พิมพ์")
-    prog.setMinimumDuration(400)
-    prog.setWindowModality(2)  # Qt.WindowModal
+    prog.setMinimumDuration(0)
+    prog.setAutoClose(False)
+    prog.setAutoReset(False)
+    prog.setWindowModality(Qt.WindowModality.WindowModal)
+    prog.setValue(0)
+    prog.show()
+    QApplication.processEvents()
 
     def cb(i: int, total: int) -> bool:
         prog.setValue(i)
@@ -120,6 +143,26 @@ def run_print(parent, printer: QPrinter, doc: pymupdf.Document, current: int) ->
         return False
     prog.close()
     return True
+
+
+def print_via_system(doc: pymupdf.Document, title: str = "") -> str:
+    """ทางสำรอง: บันทึกไฟล์ PDF ชั่วคราวแล้วเปิดด้วยโปรแกรมอ่าน PDF ของเครื่อง (ไปสั่งพิมพ์จากโปรแกรมนั้น)"""
+    import os
+    import re
+    import subprocess
+    import sys
+    import tempfile
+
+    safe = re.sub(r'[\\/:*?"<>|]+', "_", title or "document").strip() or "document"
+    path = os.path.join(tempfile.mkdtemp(prefix="governix_print_"), f"{safe}.pdf")
+    doc.save(path, garbage=3, deflate=True)
+    if sys.platform.startswith("win"):
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+    return path
 
 
 def print_preview(parent, doc: pymupdf.Document, current: int, title: str = "") -> None:

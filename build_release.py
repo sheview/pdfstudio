@@ -1,4 +1,4 @@
-"""สร้างโปรแกรมติดตั้ง PDF Governix ในคำสั่งเดียว:  python build_release.py
+"""สร้างโปรแกรมติดตั้ง Governix PDF ในคำสั่งเดียว:  python build_release.py
 
 ขั้นตอน: สร้างไอคอน -> สร้าง .exe ด้วย PyInstaller -> สร้าง Setup.exe ด้วย Inno Setup
 (ใช้ทั้งบนเครื่องตัวเองและใน GitHub Actions — ชื่อโปรแกรม/เวอร์ชันอ่านจาก app/config.py)
@@ -55,6 +55,7 @@ def main() -> int:
         "--name", APP_NAME, "--icon", str(Path("assets") / "icon.ico"),
         "--add-data", f"assets{sep}assets",
         "--collect-all", "qtawesome", "--collect-all", "pymupdf",
+        "--collect-all", "pdf2docx", "--collect-data", "docx", "--hidden-import", "docx", "--hidden-import", "cv2", "--hidden-import", "fitz",
         "--exclude-module", "tkinter", "--exclude-module", "PySide6.QtWebEngineCore",
         "--exclude-module", "PySide6.QtQml", "--exclude-module", "PySide6.Qt3DCore",
         "--exclude-module", "PySide6.QtMultimedia",

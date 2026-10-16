@@ -663,12 +663,19 @@ class PdfView(QScrollArea):
                 return name
         return None
 
-    def _hit_object(self, pos: QPointF) -> FloatObj | None:
-        for o in reversed(self.get_objects()):
-            r = self._obj_rect(o)
-            if r is not None and r.adjusted(-4, -4, 4, 4).contains(pos):
-                return o
-        return None
+    def _hit_object(self, pos: QPointF, below: bool = False) -> FloatObj | None:
+        """วัตถุบนสุดใต้ตำแหน่งเมาส์ — below=True (กด Alt) จะเลือกชิ้นที่ซ้อนอยู่ข้างใต้ชิ้นที่เลือกอยู่"""
+        hits = [o for o in reversed(self.get_objects())
+                if (r := self._obj_rect(o)) is not None and r.adjusted(-4, -4, 4, 4).contains(pos)]
+        if not hits:
+            return None
+        if below and len(hits) > 1:
+            cur = self.selected_uid
+            for k, o in enumerate(hits):
+                if o.uid == cur:
+                    return hits[(k + 1) % len(hits)]
+            return hits[1]
+        return hits[0]
 
     def _paint_objects(self, p: QPainter, i: int, pr: QRectF) -> None:
         objs = [o for o in self.get_objects() if o.page == i]
@@ -727,7 +734,7 @@ class PdfView(QScrollArea):
             if h:
                 self._begin_obj_drag(sel, h, pos)
                 return True
-        o = self._hit_object(pos)
+        o = self._hit_object(pos, below=bool(mods & Qt.KeyboardModifier.AltModifier))
         if o is not None:
             self.clear_selection()
             if multi:
@@ -1099,6 +1106,8 @@ class PdfView(QScrollArea):
             if o is not None:
                 if o.is_text:
                     self.objectEditRequested.emit(o.uid)
+                else:
+                    self._press_object(ev.position(), ev.modifiers())   # รูป: ดับเบิลคลิก/คลิกถี่ ๆ ยังลากย้ายต่อได้
                 return
         if self.tool not in TEXT_TOOLS:
             return

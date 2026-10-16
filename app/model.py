@@ -7,6 +7,7 @@ from pathlib import Path
 import pymupdf
 from PySide6.QtCore import QObject, Signal
 
+from . import editstate
 from . import objects as objs_mod
 from . import ops
 from .config import MAX_UNDO
@@ -22,6 +23,8 @@ class PdfModel(QObject):
         self.doc = doc
         self.path = path
         self.was_encrypted = False
+        self.embed_editable = True            # แนบข้อมูลให้เปิดมาแก้รูป/ข้อความต่อได้
+        self.restored_objects = 0
         self.objects: list[FloatObj] = []     # วัตถุลอย (รูป/ข้อความ) ที่ยังไม่ฝังลงเอกสาร
         self._undo: list[tuple[bytes, list[FloatObj]]] = []
         self._redo: list[tuple[bytes, list[FloatObj]]] = []
@@ -35,7 +38,16 @@ class PdfModel(QObject):
         p = Path(path)
         doc = ops.open_any(p, password)
         is_image = p.suffix.lower() in ops.IMAGE_EXTS
+        restored = None if is_image else editstate.try_restore(doc)
+        if restored is not None:            # ไฟล์ที่เคยบันทึกจาก Governix PDF → กู้รูป/ข้อความให้แก้ไขต่อได้
+            base, objs = restored
+            doc.close()
+            doc = pymupdf.open("pdf", base)
         m = cls(doc, None if is_image else str(p))
+        if restored is not None:
+            m.objects = restored[1]
+            m._current = m._snapshot()
+            m.restored_objects = len(m.objects)
         m.was_encrypted = bool(password)
         if is_image:
             m._set_dirty(True)
@@ -90,6 +102,18 @@ class PdfModel(QObject):
         gone = {o.uid for o in chosen}
         self.objects = [o for o in self.objects if o.uid not in gone]
         return done
+
+    def remap_objects(self, mapping: dict[int, list[int]]) -> None:
+        """ย้ายวัตถุลอยตามการจัดหน้าใหม่ (สลับ/ลบ/แทรก/ทำสำเนาหน้า) โดยไม่ต้องฝังลงเอกสาร
+        mapping: เลขหน้าเดิม → รายการเลขหน้าใหม่ (ว่าง = หน้านั้นถูกลบ, หลายค่า = ทำสำเนา)"""
+        out: list[FloatObj] = []
+        for o in self.objects:
+            news = mapping.get(o.page, [o.page])
+            for k, n in enumerate(news):
+                c = o if k == 0 else o.clone(new_uid=True)
+                c.page = n
+                out.append(c)
+        self.objects = out
 
     @contextmanager
     def baked(self):
@@ -159,6 +183,9 @@ class PdfModel(QObject):
         tmp = Path(target).with_suffix(".tmp_pdfgovernix")
         try:
             with self.baked() as d:
+                if self.objects and self.embed_editable and d is not self.doc:
+                    base = self.doc.tobytes(garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_NONE)
+                    editstate.attach(d, editstate.pack(base, self.objects, editstate.digest(d)))
                 d.save(str(tmp), garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_NONE)
             tmp.replace(target)
         finally:

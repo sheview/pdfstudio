@@ -4,8 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
@@ -98,7 +98,7 @@ class Ribbon(QWidget):
         logo = QLabel()
         logo.setPixmap(icon("file-pdf-box", ACCENT, ACCENT).pixmap(30, 30))
         top.addWidget(logo)
-        name = QLabel("PDF <span style='font-weight:400;color:#697386'>Governix</span>")
+        name = QLabel("Governix <span style='font-weight:400;color:#697386'>PDF</span>")
         name.setObjectName("Logo")
         name.setTextFormat(Qt.TextFormat.RichText)
         top.addWidget(name)
@@ -233,8 +233,11 @@ THUMB_CELL_H = THUMB_H + THUMB_LABEL_H
 
 
 class ThumbList(QListWidget):
-    reordered = Signal(list)
+    """แผงภาพย่อหน้า — ลากสลับ/ย้ายหน้าด้วยเมาส์ (เขียนการลากเองแทน drag&drop ของ Qt เพื่อให้ทำงานเหมือนกันทุกเครื่อง)"""
+    reordered = Signal(list, list)          # (ลำดับใหม่ = เลขหน้าเดิมเรียงตามลำดับใหม่, ตำแหน่งใหม่ของหน้าที่ย้าย)
     deleteRequested = Signal()
+
+    DRAG_START_PX = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -244,21 +247,120 @@ class ThumbList(QListWidget):
         self.setUniformItemSizes(True)
         self.setIconSize(QSize(THUMB_W, THUMB_CELL_H))
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QListWidget.DragDropMode.NoDragDrop)
         self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.setSpacing(0)
+        self._press: QPoint | None = None
+        self._press_row = -1
+        self._dragging = False
+        self._insert: int | None = None          # ตำแหน่งแทรก 0..n (ก่อนแถวที่ n)
+        self._scroll = QTimer(self)
+        self._scroll.setInterval(30)
+        self._scroll.timeout.connect(self._auto_scroll)
+        self._scroll_dir = 0
 
-    def dropEvent(self, ev):  # noqa: N802
-        super().dropEvent(ev)
-        order = [self.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.count())]
-        if order != sorted(order):
-            QTimer.singleShot(0, lambda: self.reordered.emit(order))
+    # ── คำนวณตำแหน่งแทรกจากตำแหน่งเมาส์ ──
+    def _insert_index(self, pos: QPoint) -> int:
+        n = self.count()
+        if n == 0:
+            return 0
+        it = self.itemAt(pos)
+        if it is not None:
+            r = self.visualItemRect(it)
+            row = self.row(it)
+            return row if pos.y() < r.center().y() else row + 1
+        last = self.visualItemRect(self.item(n - 1))
+        return n if pos.y() > last.bottom() else 0
+
+    def mousePressEvent(self, ev):  # noqa: N802
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._press = ev.position().toPoint()
+            it = self.itemAt(self._press)
+            self._press_row = self.row(it) if it is not None else -1
+            self._dragging = False
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):  # noqa: N802
+        if self._press is not None and (ev.buttons() & Qt.MouseButton.LeftButton) and self._press_row >= 0:
+            pos = ev.position().toPoint()
+            if not self._dragging and (pos - self._press).manhattanLength() >= self.DRAG_START_PX:
+                if not self.item(self._press_row).isSelected():       # ลากหน้าที่ยังไม่ได้เลือก → เลือกเฉพาะหน้านั้น
+                    self.clearSelection()
+                    self.item(self._press_row).setSelected(True)
+                self._dragging = True
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                self._scroll.start()
+            if self._dragging:
+                self._insert = self._insert_index(pos)
+                h = self.viewport().height()
+                self._scroll_dir = -1 if pos.y() < 28 else (1 if pos.y() > h - 28 else 0)
+                self.viewport().update()
+                return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):  # noqa: N802
+        was = self._dragging
+        target = self._insert
+        self._reset_drag()
+        if was and ev.button() == Qt.MouseButton.LeftButton and target is not None:
+            self._drop(target)
+            return
+        super().mouseReleaseEvent(ev)
+
+    def _reset_drag(self) -> None:
+        self._press = None
+        self._press_row = -1
+        self._dragging = False
+        self._insert = None
+        self._scroll.stop()
+        self.viewport().unsetCursor()
+        self.viewport().update()
+
+    def _auto_scroll(self) -> None:
+        if self._dragging and self._scroll_dir:
+            sb = self.verticalScrollBar()
+            sb.setValue(sb.value() + self._scroll_dir * 18)
+            pos = self.viewport().mapFromGlobal(QCursor.pos())
+            self._insert = self._insert_index(pos)
+            self.viewport().update()
+
+    def _drop(self, target: int) -> None:
+        n = self.count()
+        pages = sorted(self.row(it) for it in self.selectedItems())
+        if not pages:
+            return
+        rest = [i for i in range(n) if i not in pages]
+        k = sum(1 for i in rest if i < target)
+        order = rest[:k] + pages + rest[k:]
+        if order == list(range(n)):
+            return                                  # วางที่เดิม — ไม่มีอะไรเปลี่ยน
+        moved = list(range(k, k + len(pages)))
+        self.reordered.emit(order, moved)
+
+    def paintEvent(self, ev):  # noqa: N802
+        super().paintEvent(ev)
+        if not self._dragging or self._insert is None or self.count() == 0:
+            return
+        n = self.count()
+        i = min(self._insert, n)
+        r = self.visualItemRect(self.item(i if i < n else n - 1))
+        y = r.top() if i < n else r.bottom()
+        p = QPainter(self.viewport())
+        col = QColor(ACCENT)
+        p.setPen(QPen(col, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(8, y, self.viewport().width() - 8, y)
+        p.setBrush(col)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPoint(8, y), 4, 4)
+        p.drawEllipse(QPoint(self.viewport().width() - 8, y), 4, 4)
+        p.end()
 
     def keyPressEvent(self, ev):  # noqa: N802
         if ev.key() == Qt.Key.Key_Delete:
             self.deleteRequested.emit()
+            return
+        if ev.key() == Qt.Key.Key_Escape and self._dragging:
+            self._reset_drag()
             return
         super().keyPressEvent(ev)
 
@@ -404,7 +506,7 @@ class WelcomePage(QWidget):
         ic.setPixmap(icon("file-pdf-box", ACCENT, ACCENT).pixmap(84, 84))
         ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(ic)
-        t = QLabel("ยินดีต้อนรับสู่ PDF Governix")
+        t = QLabel("ยินดีต้อนรับสู่ Governix PDF")
         t.setObjectName("WelcomeTitle")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(t)

@@ -140,9 +140,10 @@ class MainWindow(QMainWindow):
         # ไฟล์
         self.act_open = self._act("เปิดไฟล์", "folder-open-outline", self.open_dialog, "Ctrl+O", "เปิดไฟล์ PDF หรือรูปภาพ", doc=False)
         self.act_save = self._act("บันทึก", "content-save-outline", T("save"), "Ctrl+S", "บันทึกไฟล์")
-        self.act_save_as = self._act("บันทึกเป็น", "content-save-edit-outline", T("save_as"), "Ctrl+Shift+S", "บันทึกเป็นไฟล์ใหม่")
+        self.act_save_as = self._act("บันทึกเป็น", "content-save-edit-outline", T("save_as"), "Ctrl+Shift+S", "บันทึกเป็นไฟล์ใหม่ — เลือกชนิดได้: PDF, Word (.docx) หรือรูป JPEG")
         self.act_close = self._act("ปิดไฟล์", "close-box-outline", self.close_current, "Ctrl+W", "ปิดไฟล์ที่เปิดอยู่")
         self.act_print = self._act("พิมพ์", "printer-outline", T("print_"), "Ctrl+P", "พิมพ์เอกสาร")
+        self.act_print_sys = self._act("พิมพ์ผ่านระบบ", "printer-settings", T("print_system"), None, "ทางสำรอง: เปิดในโปรแกรมอ่าน PDF ของเครื่องแล้วสั่งพิมพ์จากที่นั่น (ใช้เมื่อพิมพ์จากโปรแกรมนี้ไม่ได้)")
         self.act_preview = self._act("ตัวอย่างพิมพ์", "printer-eye", T("print_preview"), None, "ดูตัวอย่างก่อนพิมพ์")
         self.act_merge = self._act("รวมไฟล์", "file-document-multiple-outline", self.merge, "Ctrl+M",
                                    "รวมหลายไฟล์ PDF เป็นไฟล์เดียว", doc=False, primary=True)
@@ -167,6 +168,11 @@ class MainWindow(QMainWindow):
         self.act_protect = self._act("ตั้งรหัสผ่าน", "lock-outline", self.protect, None,
                                      "ตั้งรหัสผ่านเปิดไฟล์ (เข้ารหัส AES-256) ให้เอกสารนี้หรือหลายไฟล์", doc=False)
         self.act_watermark = self._act("ลายน้ำ", "water-opacity", T("add_watermark"), None, "ใส่ลายน้ำข้อความหรือรูปภาพ (ทุกหน้า/บางหน้า)")
+        self.act_calc = self._act("เครื่องคิดเลข", "calculator-variant", self.show_calculator, "Ctrl+Shift+K", "เปิดเครื่องคิดเลข (พิมพ์สูตรได้ มี % และ VAT)", doc=False)
+        self.act_installments = self._act("คิดงวดเงิน", "cash-multiple", self.show_installments, None, "คิดเงินแต่ละงวดตาม % ของมูลค่าสัญญา (ดึงตัวเลขจากเอกสารได้)", doc=False)
+        self.act_qr = self._act("QR Code", "qrcode", T("add_qr"), None, "สร้าง QR Code จากลิงก์ไฟล์ แล้ววางบนหน้าให้ลูกค้า scan")
+        self.act_img_crop = self._act("ครอปรูป", "crop", T("crop_object"), None, "ตัดส่วนที่ไม่ต้องการของรูปที่เลือกออก")
+        self.act_img_removebg = self._act("ลบพื้นหลัง", "image-remove", T("remove_bg_object"), None, "ทำพื้นหลังของรูปที่เลือกให้โปร่งใส (เหมาะกับลายเซ็น โลโก้ ตราประทับ)")
         self.act_obj_edit = self._act("แก้ไข", "pencil-outline", T("edit_object"), "F2", "แก้ไขข้อความของกล่องข้อความที่เลือก (ดับเบิลคลิกก็ได้)")
         self.act_select_all = self._act("เลือกทั้งหน้า", "select-all", self.select_all, "Ctrl+A", "เลือกข้อความทั้งหน้า")
         self.act_highlight_sel = self._act("ไฮไลต์ข้อความที่เลือก", "marker", lambda: self._tab_call("apply_markup_to_selection")("highlight"))
@@ -224,17 +230,18 @@ class MainWindow(QMainWindow):
         A = self
         self.ribbon.add_tab("หน้าแรก", [
             ("ไฟล์", [A.act_open, A.act_save, A.act_save_as, A.act_close]),
-            ("พิมพ์", [A.act_print, A.act_preview]),
+            ("พิมพ์", [A.act_print, A.act_preview, A.act_print_sys]),
             ("รวม", [A.act_merge]),
             ("ความปลอดภัย", [A.act_protect]),
+            ("คำนวณ", [A.act_calc, A.act_installments]),
             ("ประวัติ", [A.act_undo, A.act_redo]),
             ("มุมมอง", [A.act_zoom_in, A.act_zoom_out, A.act_fit_width, A.act_fit_page, A.act_find, A.act_thumbs]),
         ])
         self.ribbon.add_tab("แก้ไข", [
             ("เครื่องมือ", [A.act_t_select, A.act_t_hand]),
             ("มาร์กอัป", [A.act_t_hl, A.act_t_ul, A.act_t_st]),
-            ("แทรก", [A.act_t_text, A.act_t_img, A.act_t_pen, A.act_watermark]),
-            ("วัตถุที่เลือก", [A.act_obj_edit, A.act_copy, A.act_paste, A.act_obj_dup, A.act_obj_delete]),
+            ("แทรก", [A.act_t_text, A.act_t_img, A.act_t_pen, A.act_watermark, A.act_qr]),
+            ("วัตถุที่เลือก", [A.act_obj_edit, A.act_img_crop, A.act_img_removebg, A.act_copy, A.act_paste, A.act_obj_dup, A.act_obj_delete]),
             ("แก้ไข / ลบ", [A.act_t_edit, A.act_t_erase, A.act_t_redact]),
             ("ประวัติ", [A.act_undo, A.act_redo]),
         ])
@@ -536,6 +543,38 @@ class MainWindow(QMainWindow):
             t.view.clear_selection()
             self.set_tool(Tool.SELECT)
 
+    # ── เครื่องคิดเลข / คิดงวดเงิน (หน้าต่างลอย เปิดค้างไว้ได้) ──
+    def _front(self, dlg) -> None:
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def show_calculator(self) -> None:
+        if getattr(self, "_calc_dlg", None) is None:
+            from .calcdialogs import CalculatorDialog
+            self._calc_dlg = CalculatorDialog(self)
+            self._calc_dlg.insertText.connect(lambda s: self._with_tab(lambda t: t.insert_text_value(s)))
+        self._front(self._calc_dlg)
+
+    def show_installments(self) -> None:
+        if getattr(self, "_inst_dlg", None) is None:
+            from .calcdialogs import InstallmentDialog
+            self._inst_dlg = InstallmentDialog(
+                self,
+                page_text=lambda: (self.current_tab().page_text() if self.current_tab() else ""),
+                selected_text=lambda: (self.current_tab().view.selected_text() if self.current_tab() else ""),
+            )
+            self._inst_dlg.insertImage.connect(lambda b: self._with_tab(lambda t: t.insert_png(b)))
+        self._front(self._inst_dlg)
+
+    def _with_tab(self, fn) -> None:
+        t = self.current_tab()
+        if t is None:
+            self.show_message("เปิดเอกสารก่อนจึงจะวางลงหน้าได้")
+            return
+        fn(t)
+        self.activateWindow()
+
     def show_message(self, text: str) -> None:
         self.msg.setText(text)
 
@@ -586,6 +625,8 @@ class MainWindow(QMainWindow):
         for a in (self.act_obj_dup, self.act_obj_delete, self.act_obj_front, self.act_obj_back):
             a.setEnabled(bool(objs))
         self.act_obj_edit.setEnabled(obj is not None and obj.is_text)
+        for a in (self.act_img_crop, self.act_img_removebg):
+            a.setEnabled(obj is not None and not obj.is_text)
         self.act_save.setEnabled(True)
         sp = self.page_spin
         sp.setEnabled(True)

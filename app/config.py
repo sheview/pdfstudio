@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-APP_NAME = "PDF Governix"
+APP_NAME = "Governix PDF"
 APP_VERSION = "1.0.0"
 ORG_NAME = "Governix"
 COPYRIGHT = "© 2026 Governix. สงวนลิขสิทธิ์ (All rights reserved)"

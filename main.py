@@ -1,10 +1,15 @@
-"""PDF Governix — จุดเริ่มต้นโปรแกรม"""
+"""Governix PDF — จุดเริ่มต้นโปรแกรม"""
 from __future__ import annotations
 
 import sys
 
 
 def main() -> int:
+    import os
+
+    for name in ("stdout", "stderr"):      # โหมดไม่มีหน้าต่างคอนโซล (.exe) ไลบรารีบางตัวยัง print/log → กันพัง
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
@@ -15,7 +20,7 @@ def main() -> int:
     if sys.platform == "win32":  # ให้ไอคอนบนแถบงานเป็นของโปรแกรม ไม่ใช่ของ python
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Governix.PDFGovernix.App")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Governix.GovernixPDF.App")
         except Exception:
             pass
 

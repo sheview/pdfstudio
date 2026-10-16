@@ -9,12 +9,14 @@ import pymupdf
 from PySide6.QtCore import QBuffer, QIODevice, QMimeData, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -22,6 +24,9 @@ from PySide6.QtWidgets import (
 
 from . import objects as objmod
 from . import ops, printing
+from . import exporters, imagetools
+from .qrtool import QrDialog
+from .imgdialogs import CropDialog, ExportOptionsDialog, RemoveBgDialog
 from .dialogs import ExportImageDialog, InsertPdfDialog, SplitDialog, TextDialog, WatermarkDialog
 from .model import PdfModel
 from .signatures import SignatureDialog
@@ -250,7 +255,7 @@ class DocTab(QWidget):
     # ───────────────────────── ใช้การแก้ไข ─────────────────────────
     def _apply(self, fn: Callable[[pymupdf.Document], None], pages: list[int] | None = None,
                select: list[int] | None = None, focus: int | None = None,
-               flatten: set[int] | None = None) -> bool:
+               flatten: set[int] | None = None, remap: dict[int, list[int]] | None = None) -> bool:
         """ทำการแก้ไข → commit → รีเฟรช (pages=None คือโครงสร้างเปลี่ยน ต้องรีเฟรชทั้งหมด)
 
         วัตถุลอย (รูป/ข้อความ) จะถูกฝังลงเอกสารก่อนเมื่อการแก้ไขกระทบโครงสร้างหน้า (pages=None)
@@ -258,11 +263,13 @@ class DocTab(QWidget):
         self._suppress = True
         touched: set[int] = set()
         try:
-            if pages is None:
+            if pages is None and remap is None:
                 touched = self.model.flatten(None)
             elif flatten:
                 touched = self.model.flatten(flatten)
             fn(self.model.doc)
+            if remap is not None:               # จัดหน้าใหม่ → ย้ายรูป/ข้อความตามไปด้วย (ยังแก้ไขต่อได้)
+                self.model.remap_objects(remap)
             self.model.commit()
         except Exception as e:
             self._suppress = False
@@ -453,6 +460,91 @@ class DocTab(QWidget):
         objmod.relayout(o)
         self._commit_objects([o.page])
 
+    # ── QR Code / ผลจากเครื่องคิดเลข ──
+    def add_qr(self) -> None:
+        dlg = QrDialog(self.window())
+        if dlg.exec() != QrDialog.DialogCode.Accepted:
+            return
+        png, caption, width = dlg.values()
+        page = self.view.current_page
+        size = self.view.sizes[page]
+        c = self.view.visible_center(page)
+        qr = objmod.make_image(page, png, c.x(), c.y(), width, size)
+        new = [qr]
+        if caption:
+            st = TextStyle(family=default_thai_font(), size=9.5, align="center")
+            cap = objmod.make_text(page, qr.x, qr.y + qr.h + 2, qr.w, caption, st)
+            new.append(cap)
+        self.model.objects.extend(new)
+        self._commit_objects([page])
+        self.view.select_objects([o.uid for o in new])
+        self.message.emit("วาง QR Code แล้ว — ลากย้าย/ย่อขยายได้ (ลองสแกนด้วยมือถือก่อนแจกลูกค้า)")
+
+    def insert_png(self, data: bytes) -> None:
+        """วางรูป (เช่น ตารางงวดเงิน) กลางส่วนที่มองเห็นของหน้าปัจจุบัน"""
+        page = self.view.current_page
+        pw, ph = self.view.sizes[page]
+        iw, _ = objmod.image_size(data)
+        c = self.view.visible_center(page)
+        o = objmod.make_image(page, data, c.x(), c.y(), min(iw / 2.0, pw - 40), (pw, ph))
+        self.add_object(o)
+
+    def insert_text_value(self, text: str) -> None:
+        page = self.view.current_page
+        pw, _ = self.view.sizes[page]
+        c = self.view.visible_center(page)
+        o = objmod.make_text(page, max(c.x() - 80, 0.0), c.y(), 160, text, self.win.text_style_copy())
+        self.add_object(o)
+
+    def page_text(self) -> str:
+        return self.model.doc[self.view.current_page].get_text()
+
+    # ── แก้ไขรูป: ครอป / ลบพื้นหลัง ──
+    def _selected_image(self) -> objmod.FloatObj | None:
+        o = self.selected_object()
+        return o if o is not None and not o.is_text else None
+
+    def _apply_image_edit(self, o: objmod.FloatObj, data: bytes, frac: tuple[float, float, float, float]) -> None:
+        """เปลี่ยนข้อมูลรูป โดยให้ส่วนที่เหลืออยู่ตำแหน่ง/ขนาดเดิมบนหน้า (frac = ส่วนของภาพเดิมที่ยังเก็บไว้)"""
+        x0, y0, x1, y1 = frac
+        o.x, o.y = o.x + x0 * o.w, o.y + y0 * o.h
+        o.w, o.h = max(objmod.MIN_SIZE, o.w * (x1 - x0)), max(objmod.MIN_SIZE, o.h * (y1 - y0))
+        o.data = data
+        self._commit_objects([o.page])
+        self.view.select_object(o.uid)
+
+    def crop_object(self) -> None:
+        o = self._selected_image()
+        if o is None:
+            self.message.emit("เลือกรูปก่อน แล้วค่อยกดครอป")
+            return
+        dlg = CropDialog(self.window(), o.data)
+        if dlg.exec() != CropDialog.DialogCode.Accepted:
+            return
+        try:
+            data, real = imagetools.crop_image(o.data, dlg.fractions())
+        except Exception as e:
+            QMessageBox.warning(self.window(), "ครอปรูป", str(e))
+            return
+        self._apply_image_edit(o, data, real)
+        self.message.emit("ครอปรูปแล้ว (กด Ctrl+Z เพื่อย้อนกลับ)")
+
+    def remove_bg_object(self) -> None:
+        o = self._selected_image()
+        if o is None:
+            self.message.emit("เลือกรูปก่อน แล้วค่อยกดลบพื้นหลัง")
+            return
+        dlg = RemoveBgDialog(self.window(), o.data)
+        if dlg.exec() != RemoveBgDialog.DialogCode.Accepted:
+            return
+        try:
+            data, frac = dlg.result()
+        except Exception as e:
+            QMessageBox.warning(self.window(), "ลบพื้นหลัง", str(e))
+            return
+        self._apply_image_edit(o, data, frac)
+        self.message.emit("ลบพื้นหลังแล้ว (กด Ctrl+Z เพื่อย้อนกลับ)")
+
     def _clone_near(self, o: objmod.FloatObj) -> objmod.FloatObj:
         c = o.clone(new_uid=True)
         pw, ph = self.view.sizes[min(c.page, len(self.view.sizes) - 1)]
@@ -561,6 +653,10 @@ class DocTab(QWidget):
         if o.is_text and len(self.selected_objects()) <= 1:
             m.addAction("แก้ไขข้อความ…", lambda: self.edit_object(uid))
             m.addSeparator()
+        if not o.is_text and len(self.selected_objects()) <= 1:
+            m.addAction(w.act_img_crop)
+            m.addAction(w.act_img_removebg)
+            m.addSeparator()
         for a in (w.act_copy, w.act_paste, w.act_obj_dup, w.act_obj_front, w.act_obj_back):
             m.addAction(a)
         m.addSeparator()
@@ -581,16 +677,27 @@ class DocTab(QWidget):
         if QMessageBox.question(self.window(), "ลบหน้า", f"ต้องการลบ {label} ใช่หรือไม่?\n(ย้อนกลับได้ด้วย Ctrl+Z)") != QMessageBox.StandardButton.Yes:
             return
         nxt = min(pages[0], self.model.page_count - len(pages) - 1)
-        self._apply(lambda d: ops.delete_pages(d, pages), None, select=[nxt], focus=nxt)
+        n = self.model.page_count
+        gone = set(pages)
+        keep = [i for i in range(n) if i not in gone]
+        remap = {old: ([keep.index(old)] if old in keep else []) for old in range(n)}
+        self._apply(lambda d: ops.delete_pages(d, pages), None, select=[nxt], focus=nxt, remap=remap)
 
     def insert_blank(self) -> None:
         after = max(self.selected_pages())
-        self._apply(lambda d: ops.insert_blank_page(d, after), None, select=[after + 1], focus=after + 1)
+        n = self.model.page_count
+        remap = {old: [old if old <= after else old + 1] for old in range(n)}
+        self._apply(lambda d: ops.insert_blank_page(d, after), None, select=[after + 1], focus=after + 1, remap=remap)
 
     def duplicate(self) -> None:
         pages = self.selected_pages()
         sel = [p + 1 + k for k, p in enumerate(pages)]
-        self._apply(lambda d: ops.duplicate_pages(d, pages), None, select=sel, focus=sel[0])
+        dups = sorted(set(pages))
+        remap = {}
+        for old in range(self.model.page_count):
+            new = old + sum(1 for q in dups if q < old)
+            remap[old] = [new, new + 1] if old in dups else [new]
+        self._apply(lambda d: ops.duplicate_pages(d, pages), None, select=sel, focus=sel[0], remap=remap)
 
     def move(self, direction: int) -> None:
         pages = self.selected_pages()
@@ -606,12 +713,13 @@ class DocTab(QWidget):
             for p in reversed(block):
                 order[p + 1], order[p] = order[p], order[p + 1]
         new_sel = [order.index(p) for p in pages]
-        self._apply(lambda d: ops.reorder_pages(d, order), None, select=new_sel, focus=new_sel[0])
+        self._apply(lambda d: ops.reorder_pages(d, order), None, select=new_sel, focus=new_sel[0],
+                    remap={old: [new] for new, old in enumerate(order)})
 
-    def on_reorder(self, order: list[int]) -> None:
-        """ผู้ใช้ลากภาพย่อสลับลำดับ — order คือเลขหน้าเดิมตามลำดับใหม่"""
-        moved = [k for k in range(self.thumbs.count()) if self.thumbs.item(k).isSelected()]
-        self._apply(lambda d: ops.reorder_pages(d, order), None, select=moved)
+    def on_reorder(self, order: list[int], moved: list[int]) -> None:
+        """ผู้ใช้ลากภาพย่อสลับลำดับ — order คือเลขหน้าเดิมตามลำดับใหม่, moved คือตำแหน่งใหม่ของหน้าที่ถูกลาก"""
+        self._apply(lambda d: ops.reorder_pages(d, order), None, select=moved, focus=moved[0] if moved else None,
+                    remap={old: [new] for new, old in enumerate(order)})
 
     def insert_pdf(self) -> None:
         dlg = InsertPdfDialog(self.window(), max(self.selected_pages()), self.model.page_count, self.win.start_dir())
@@ -628,7 +736,8 @@ class DocTab(QWidget):
                 src.close()
 
         sel = list(range(at, at + len(pages)))
-        self._apply(run, None, select=sel, focus=at)
+        remap = {old: [old if old < at else old + len(pages)] for old in range(self.model.page_count)}
+        self._apply(run, None, select=sel, focus=at, remap=remap)
 
     def split_pages(self) -> None:
         n = self.model.page_count
@@ -756,14 +865,68 @@ class DocTab(QWidget):
             return self.save_as()
         return self._save_to(None)
 
+    SAVE_FILTERS = "PDF (*.pdf);;Word (*.docx);;รูปภาพ JPEG (*.jpg *.jpeg)"
+
     def save_as(self) -> bool:
-        suggested = self.model.path or str(Path(self.win.start_dir()) / "เอกสารใหม่.pdf")
-        out, _ = QFileDialog.getSaveFileName(self.window(), "บันทึกเป็น", suggested, "PDF (*.pdf)")
+        base = Path(self.model.path).with_suffix("") if self.model.path else Path(self.win.start_dir()) / "เอกสารใหม่"
+        out, flt = QFileDialog.getSaveFileName(self.window(), "บันทึกเป็น", str(base) + ".pdf", self.SAVE_FILTERS)
         if not out:
             return False
-        if not out.lower().endswith(".pdf"):
-            out += ".pdf"
+        ext = Path(out).suffix.lower()
+        if ext not in (".pdf", ".docx", ".jpg", ".jpeg"):
+            ext = ".docx" if "Word" in flt else (".jpg" if "JPEG" in flt else ".pdf")
+            out += ext
+        if ext == ".docx":
+            return self._export_docx(out)
+        if ext in (".jpg", ".jpeg"):
+            return self._export_jpeg(out)
         return self._save_to(out)
+
+    def _export_pages_preset(self) -> str:
+        sel = self.selected_pages() if self.has_page_selection() else []
+        return ", ".join(str(p + 1) for p in sel) if len(sel) > 1 else ""      # เลือกหลายหน้าไว้ → ใส่ให้เลย ไม่งั้นทุกหน้า
+
+    def _export_jpeg(self, out: str) -> bool:
+        dlg = ExportOptionsDialog(self.window(), "jpg", self.model.page_count, self.view.current_page,
+                                  self._export_pages_preset())
+        if dlg.exec() != ExportOptionsDialog.DialogCode.Accepted:
+            return False
+        v = dlg.values()
+        try:
+            with self.model.baked() as d:
+                files = exporters.export_jpeg(d, out, v["pages"], v["dpi"], v["quality"],
+                                              progress=lambda n, t: QApplication.processEvents())
+        except Exception as e:
+            QMessageBox.critical(self.window(), "บันทึกเป็นรูปไม่สำเร็จ", str(e))
+            return False
+        self.message.emit(f"บันทึกเป็นรูป JPEG แล้ว {len(files)} ไฟล์: {files[0] if len(files) == 1 else str(Path(out).parent)}")
+        return True
+
+    def _export_docx(self, out: str) -> bool:
+        dlg = ExportOptionsDialog(self.window(), "docx", self.model.page_count, self.view.current_page,
+                                  self._export_pages_preset())
+        if dlg.exec() != ExportOptionsDialog.DialogCode.Accepted:
+            return False
+        v = dlg.values()
+        prog = QProgressDialog("กำลังแปลงเป็น Word…", None, 0, 0, self.window())
+        prog.setWindowTitle("บันทึกเป็น Word")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.show()
+        try:
+            with self.model.baked() as d:
+                if v["editable"]:
+                    fn = lambda: exporters.export_docx_editable(d, out, v["pages"])  # noqa: E731
+                else:
+                    fn = lambda: exporters.export_docx_images(d, out, v["pages"])  # noqa: E731
+                exporters.run_in_thread(fn, QApplication.processEvents)
+        except Exception as e:
+            prog.close()
+            QMessageBox.critical(self.window(), "บันทึกเป็น Word ไม่สำเร็จ", str(e))
+            return False
+        prog.close()
+        self.message.emit(f"บันทึกเป็น Word แล้ว: {out}")
+        return True
 
     def _save_to(self, path: str | None) -> bool:
         if self.model.was_encrypted and not self._warned_encrypt:
@@ -805,6 +968,15 @@ class DocTab(QWidget):
     def print_(self) -> None:
         with self.model.baked() as d:
             printing.print_document(self.window(), d, self.view.current_page, self.model.title)
+
+    def print_system(self) -> None:
+        """ทางสำรอง: เปิดไฟล์ในโปรแกรมอ่าน PDF ของเครื่องเพื่อสั่งพิมพ์จากที่นั่น"""
+        try:
+            with self.model.baked() as d:
+                printing.print_via_system(d, self.model.title)
+            self.message.emit("เปิดเอกสารในโปรแกรมอ่าน PDF ของเครื่องแล้ว — สั่งพิมพ์ (Ctrl+P) จากโปรแกรมนั้นได้เลย")
+        except Exception as e:
+            QMessageBox.warning(self.window(), "พิมพ์ผ่านระบบ", f"เปิดไฟล์ไม่ได้: {e}")
 
     def print_preview(self) -> None:
         with self.model.baked() as d:
