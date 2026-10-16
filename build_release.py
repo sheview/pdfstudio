@@ -55,7 +55,7 @@ def main() -> int:
         "--name", APP_NAME, "--icon", str(Path("assets") / "icon.ico"),
         "--add-data", f"assets{sep}assets",
         "--collect-all", "qtawesome", "--collect-all", "pymupdf",
-        "--collect-all", "pdf2docx", "--collect-data", "docx", "--hidden-import", "docx", "--hidden-import", "cv2", "--hidden-import", "fitz",
+        "--collect-all", "pdf2docx", "--collect-all", "segno", "--collect-data", "docx", "--hidden-import", "docx", "--hidden-import", "cv2", "--hidden-import", "fitz",
         "--exclude-module", "tkinter", "--exclude-module", "PySide6.QtWebEngineCore",
         "--exclude-module", "PySide6.QtQml", "--exclude-module", "PySide6.Qt3DCore",
         "--exclude-module", "PySide6.QtMultimedia",

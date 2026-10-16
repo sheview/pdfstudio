@@ -4,7 +4,6 @@ from __future__ import annotations
 import io
 import re
 
-import segno
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout, QLabel, QLineEdit, QMessageBox, QVBoxLayout
@@ -27,6 +26,8 @@ def normalize_url(text: str) -> str:
 
 
 def make_qr_png(url: str, scale: int = 10, border: int = 2, level: str = "m") -> bytes:
+    import segno          # นำเข้าตอนใช้งานจริง — ถ้าไลบรารีหายก็ไม่ทำให้โปรแกรมเปิดไม่ขึ้น
+
     q = segno.make(url, error=level, micro=False)
     buf = io.BytesIO()
     q.save(buf, kind="png", scale=scale, border=border, dark="#000000", light="#FFFFFF")
