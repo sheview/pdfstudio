@@ -105,7 +105,7 @@ QTabBar#RibbonTabs::tab:selected {{ color: {ACCENT}; border-bottom: 3px solid {A
 #RibbonGroupLabel {{ color: {MUTED}; font-size: 8.5pt; padding-bottom: 2px; }}
 QToolButton#RibbonBtn {{
     background: transparent; border: 1px solid transparent; border-radius: 9px;
-    padding: 6px 4px 3px 4px; min-width: 62px; font-size: 9.5pt;
+    padding: 6px 4px 3px 4px; font-size: 9.5pt;
 }}
 QToolButton#RibbonBtn:hover {{ background: {BG}; border-color: {BORDER}; }}
 QToolButton#RibbonBtn:pressed {{ background: {ACCENT_SOFT}; }}
@@ -113,7 +113,7 @@ QToolButton#RibbonBtn:checked {{ background: {ACCENT_SOFT}; border: 1px solid {A
 QToolButton#RibbonBtn:disabled {{ color: {ICON_DISABLED}; }}
 QToolButton#RibbonPrimary {{
     background: {GRADIENT}; color: white; border: 0; border-radius: 10px;
-    padding: 6px 4px 3px 4px; min-width: 62px; font-size: 9.5pt; font-weight: 600;
+    padding: 6px 4px 3px 4px; font-size: 9.5pt; font-weight: 600;
 }}
 QToolButton#RibbonPrimary:hover {{ background: {GRADIENT_HOVER}; }}
 QToolButton#RibbonPrimary:disabled {{ background: {ACCENT_SOFT_2}; border-color: {ACCENT_SOFT_2}; }}

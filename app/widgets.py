@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
@@ -17,7 +17,10 @@ from PySide6.QtWidgets import (
     QListView,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QTabBar,
     QToolButton,
@@ -81,6 +84,34 @@ class ColorRow(QWidget):
             self.set_color(c, emit=True)
 
 
+class _HScroll(QScrollArea):
+    resized = Signal()
+    """พื้นที่เลื่อนแนวนอนสำหรับริบบิ้น — โปร่งใส แถบเลื่อนบาง ลูกกลิ้งเมาส์เลื่อนซ้าย-ขวา"""
+
+    def __init__(self):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setStyleSheet("QScrollArea{background:transparent;} QScrollArea > QWidget > QWidget#RibbonPage{background:transparent;}"
+                           "QScrollBar:horizontal{height:8px;background:transparent;margin:0 12px;}"
+                           "QScrollBar::handle:horizontal{background:#C9CCE0;border-radius:4px;min-width:40px;}"
+                           "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;}"
+                           "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}")
+        self.viewport().setAutoFillBackground(False)
+
+    def resizeEvent(self, ev):  # noqa: N802
+        super().resizeEvent(ev)
+        self.resized.emit()
+
+    def wheelEvent(self, ev):  # noqa: N802
+        bar = self.horizontalScrollBar()
+        d = ev.angleDelta().y() or ev.angleDelta().x()
+        bar.setValue(bar.value() - d)
+        ev.accept()
+
+
 # ───────────────────────── ริบบิ้น ─────────────────────────
 class Ribbon(QWidget):
     """แถบคำสั่งแบบแท็บ + กลุ่มปุ่ม (คล้าย Office)"""
@@ -115,16 +146,20 @@ class Ribbon(QWidget):
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("RibbonBody")
-        self.stack.setFixedHeight(96)
+        self.stack.setFixedHeight(106)
         root.addWidget(self.stack)
         self.tabbar.currentChanged.connect(self.stack.setCurrentIndex)
+        self.tabbar.currentChanged.connect(lambda _i: self._relayout_all())
+        self._tabs: list[dict] = []
 
     def add_tab(self, title: str, groups: list[tuple[str, list[QAction | str]]]) -> None:
         """groups = [(ชื่อกลุ่ม, [action | "primary:ชื่อ"...])] — ใส่ action ที่ setProperty('primary', True) เพื่อทำปุ่มเด่น"""
         page = QWidget()
+        page.setObjectName("RibbonPage")
         h = QHBoxLayout(page)
         h.setContentsMargins(12, 6, 12, 4)
         h.setSpacing(0)
+        info = {"area": None, "items": [], "frames": [], "more": None}
         for gtitle, actions in groups:
             frame = QFrame()
             frame.setObjectName("RibbonGroup")
@@ -133,23 +168,120 @@ class Ribbon(QWidget):
             v.setSpacing(0)
             row = QHBoxLayout()
             row.setSpacing(2)
+            gitems = []
             for a in actions:
+                low = isinstance(a, tuple)          # ("low", action) = เมนูรอง ย้ายเข้า "เพิ่มเติม" เมื่อจอแคบ
+                if low:
+                    a = a[1]
                 btn = QToolButton()
                 btn.setObjectName("RibbonPrimary" if a.property("primary") else "RibbonBtn")
                 btn.setDefaultAction(a)
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
                 btn.setIconSize(QSize(28, 28))
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)   # ไม่บีบจนข้อความถูกตัด/ทับกัน
+                f = QFont(QApplication.font())
+                f.setPointSizeF(9.5)      # ขนาดตัวอักษรตาม stylesheet ของปุ่มริบบิ้น (ยังไม่ถูก apply ตอนสร้าง)
+                f.setWeight(QFont.Weight.DemiBold)
+                tw = QFontMetrics(f).horizontalAdvance(a.text().replace("&", "")) * 1.04
+                btn.setFixedWidth(max(66, int(tw) + 20))
                 row.addWidget(btn)
+                gitems.append({"btn": btn, "action": a, "low": low, "w": btn.width() or max(66, int(tw) + 20)})
+                info["items"].append(gitems[-1])
+            info["frames"].append((frame, gitems))
             v.addLayout(row)
             lab = QLabel(gtitle)
             lab.setObjectName("RibbonGroupLabel")
             lab.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             v.addWidget(lab)
             h.addWidget(frame)
+        # ปุ่ม "เพิ่มเติม" รวมเมนูรองเมื่อจอแคบ
+        more = QToolButton()
+        more.setObjectName("RibbonBtn")
+        more.setText("เพิ่มเติม")
+        more.setIcon(icon("dots-horizontal", ACCENT, ACCENT))
+        more.setIconSize(QSize(28, 28))
+        more.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more.setCursor(Qt.CursorShape.PointingHandCursor)
+        more.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        more.setFixedWidth(76)
+        more.setMenu(QMenu(more))
+        more.setStyleSheet("QToolButton::menu-indicator{image:none;}")
+        more.hide()
+        h.addWidget(more)
+        info["more"] = more
         h.addStretch(1)
+        # จอเล็ก: เลื่อนริบบิ้นแนวนอนแทนการบีบปุ่มให้ทับกัน (ลูกกลิ้งเมาส์เลื่อนได้)
+        area = _HScroll()
+        area.setWidget(page)
+        info["area"] = area
+        info["page"] = page
+        self._tabs.append(info)
+        area.resized.connect(self._relayout_all)
         self.tabbar.addTab(title)
-        self.stack.addWidget(page)
+        self.stack.addWidget(area)
+
+    def _relayout_all(self) -> None:
+        for info in self._tabs:
+            self._relayout(info)
+
+    def _relayout(self, info: dict) -> None:
+        """จอแคบ: เก็บปุ่มรอง (low) ที่อยู่ขวาสุดเข้าเมนู "เพิ่มเติม" ทีละปุ่มจนพอดี"""
+        avail = info["area"].viewport().width()
+        if avail < 100:                      # แท็บยังไม่ถูกแสดง / ยังไม่มีขนาดจริง
+            return
+        page, more = info["page"], info["more"]
+
+        def measure() -> int:
+            """คำนวณความกว้างรวมเอง (cache ของ layout ไม่อัปเดตทันทีหลังซ่อนปุ่ม)"""
+            total = 54                                   # margin ซ้าย-ขวาของหน้าริบบิ้น
+            for fr, gitems in info["frames"]:
+                vis = [g["btn"].width() for g in gitems if not g["btn"].isHidden()]
+                if not vis:
+                    continue
+                lab = fr.findChild(QLabel)
+                total += max(sum(vis) + 2 * (len(vis) - 1), lab.sizeHint().width() if lab else 0) + 13
+            if not more.isHidden():
+                total += more.width() + 8
+            return total
+
+        def compact(on: bool) -> None:
+            style = Qt.ToolButtonStyle.ToolButtonIconOnly if on else Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+            for it in info["items"]:
+                it["btn"].setToolButtonStyle(style)
+                it["btn"].setFixedWidth(46 if on else it["w"])
+            more.setToolButtonStyle(style)
+            more.setFixedWidth(46 if on else 76)
+
+        compact(False)
+        for it in info["items"]:
+            it["btn"].show()
+        for frame, _ in info["frames"]:
+            frame.show()
+        more.hide()
+        hidden: list = []
+        if measure() > avail:
+            more.show()
+            for it in reversed(info["items"]):
+                if not it["low"]:
+                    continue
+                it["btn"].hide()
+                hidden.append(it)
+                for frame, gitems in info["frames"]:
+                    if all(g["btn"].isHidden() for g in gitems):
+                        frame.hide()
+                if measure() <= avail:
+                    break
+            if measure() > avail:                 # ยังแคบอยู่ → เหลือแต่ไอคอน (วางเมาส์ดูชื่อได้)
+                compact(True)
+            if not hidden:
+                more.hide()
+        menu = more.menu()
+        menu.clear()
+        for it in reversed(hidden):          # เรียงตามลำดับเดิมบนริบบิ้น
+            menu.addAction(it["action"])
+        more.setVisible(bool(hidden))
 
 
 # ───────────────────────── แถบตัวเลือกเครื่องมือ ─────────────────────────

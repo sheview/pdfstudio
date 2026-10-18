@@ -231,28 +231,29 @@ class MainWindow(QMainWindow):
 
         self.ribbon = Ribbon()
         A = self
+        L = lambda act: ("low", act)      # เมนูรอง: จอแคบจะย้ายเข้าปุ่ม "เพิ่มเติม"
         self.ribbon.add_tab("หน้าแรก", [
-            ("ไฟล์", [A.act_open, A.act_save, A.act_save_as, A.act_close]),
-            ("พิมพ์", [A.act_print, A.act_preview, A.act_print_sys]),
+            ("ไฟล์", [A.act_open, A.act_save, L(A.act_save_as), L(A.act_close)]),
+            ("พิมพ์", [A.act_print, L(A.act_preview), L(A.act_print_sys)]),
             ("รวม", [A.act_merge]),
             ("ความปลอดภัย", [A.act_protect]),
-            ("นำเสนอ", [A.act_present, A.act_present_cur, A.act_present_set]),
-            ("คำนวณ", [A.act_calc, A.act_installments]),
+            ("นำเสนอ", [A.act_present, L(A.act_present_cur), L(A.act_present_set)]),
+            ("คำนวณ", [A.act_calc, L(A.act_installments)]),
             ("ประวัติ", [A.act_undo, A.act_redo]),
-            ("มุมมอง", [A.act_zoom_in, A.act_zoom_out, A.act_fit_width, A.act_fit_page, A.act_find, A.act_thumbs]),
+            ("มุมมอง", [L(A.act_zoom_in), L(A.act_zoom_out), A.act_fit_width, L(A.act_fit_page), A.act_find, L(A.act_thumbs)]),
         ])
         self.ribbon.add_tab("แก้ไข", [
             ("เครื่องมือ", [A.act_t_select, A.act_t_hand]),
-            ("มาร์กอัป", [A.act_t_hl, A.act_t_ul, A.act_t_st]),
-            ("แทรก", [A.act_t_text, A.act_t_img, A.act_t_pen, A.act_watermark, A.act_qr]),
-            ("วัตถุที่เลือก", [A.act_obj_edit, A.act_img_crop, A.act_img_removebg, A.act_copy, A.act_paste, A.act_obj_dup, A.act_obj_delete]),
-            ("แก้ไข / ลบ", [A.act_t_edit, A.act_t_erase, A.act_t_redact]),
+            ("มาร์กอัป", [A.act_t_hl, L(A.act_t_ul), L(A.act_t_st)]),
+            ("แทรก", [A.act_t_text, A.act_t_img, A.act_t_pen, L(A.act_watermark), L(A.act_qr)]),
+            ("วัตถุที่เลือก", [A.act_obj_edit, L(A.act_img_crop), L(A.act_img_removebg), A.act_copy, A.act_paste, L(A.act_obj_dup), A.act_obj_delete]),
+            ("แก้ไข / ลบ", [A.act_t_edit, A.act_t_erase, L(A.act_t_redact)]),
             ("ประวัติ", [A.act_undo, A.act_redo]),
         ])
         self.ribbon.add_tab("จัดการหน้า", [
             ("หมุน", [A.act_rotate_left, A.act_rotate_right]),
-            ("จัดหน้า", [A.act_insert_blank, A.act_duplicate, A.act_delete, A.act_move_up, A.act_move_down]),
-            ("ไฟล์อื่น", [A.act_insert_pdf, A.act_split, A.act_export_img]),
+            ("จัดหน้า", [L(A.act_insert_blank), L(A.act_duplicate), A.act_delete, L(A.act_move_up), L(A.act_move_down)]),
+            ("ไฟล์อื่น", [A.act_insert_pdf, L(A.act_split), L(A.act_export_img)]),
             ("รวม", [A.act_merge]),
         ])
         about = QToolButton()
