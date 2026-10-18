@@ -168,6 +168,9 @@ class MainWindow(QMainWindow):
         self.act_protect = self._act("ตั้งรหัสผ่าน", "lock-outline", self.protect, None,
                                      "ตั้งรหัสผ่านเปิดไฟล์ (เข้ารหัส AES-256) ให้เอกสารนี้หรือหลายไฟล์", doc=False)
         self.act_watermark = self._act("ลายน้ำ", "water-opacity", T("add_watermark"), None, "ใส่ลายน้ำข้อความหรือรูปภาพ (ทุกหน้า/บางหน้า)")
+        self.act_present = self._act("นำเสนอ", "presentation-play", T("present"), "F5", "นำเสนอเต็มจอตั้งแต่หน้าแรก — เปลี่ยนหน้าด้วยลูกศร/คลิก มีเอฟเฟกต์เฟดหรือสไลด์")
+        self.act_present_cur = self._act("นำเสนอจากหน้านี้", "play-circle-outline", lambda: self._tab_call("present")(True), "Shift+F5", "เริ่มนำเสนอจากหน้าที่กำลังดูอยู่")
+        self.act_present_set = self._act("ตั้งค่านำเสนอ", "cog-outline", self.present_settings, None, "เลือกเอฟเฟกต์เปลี่ยนหน้า ความเร็ว และเปลี่ยนหน้าอัตโนมัติ")
         self.act_calc = self._act("เครื่องคิดเลข", "calculator-variant", self.show_calculator, "Ctrl+Shift+K", "เปิดเครื่องคิดเลข (พิมพ์สูตรได้ มี % และ VAT)", doc=False)
         self.act_installments = self._act("คิดงวดเงิน", "cash-multiple", self.show_installments, None, "คิดเงินแต่ละงวดตาม % ของมูลค่าสัญญา (ดึงตัวเลขจากเอกสารได้)", doc=False)
         self.act_qr = self._act("QR Code", "qrcode", T("add_qr"), None, "สร้าง QR Code จากลิงก์ไฟล์ แล้ววางบนหน้าให้ลูกค้า scan")
@@ -233,6 +236,7 @@ class MainWindow(QMainWindow):
             ("พิมพ์", [A.act_print, A.act_preview, A.act_print_sys]),
             ("รวม", [A.act_merge]),
             ("ความปลอดภัย", [A.act_protect]),
+            ("นำเสนอ", [A.act_present, A.act_present_cur, A.act_present_set]),
             ("คำนวณ", [A.act_calc, A.act_installments]),
             ("ประวัติ", [A.act_undo, A.act_redo]),
             ("มุมมอง", [A.act_zoom_in, A.act_zoom_out, A.act_fit_width, A.act_fit_page, A.act_find, A.act_thumbs]),
@@ -544,6 +548,13 @@ class MainWindow(QMainWindow):
             self.set_tool(Tool.SELECT)
 
     # ── เครื่องคิดเลข / คิดงวดเงิน (หน้าต่างลอย เปิดค้างไว้ได้) ──
+    def present_settings(self) -> None:
+        from .presenter import PresentOptions, PresentOptionsDialog
+        dlg = PresentOptionsDialog(self, PresentOptions.load())
+        if dlg.exec() == PresentOptionsDialog.DialogCode.Accepted:
+            dlg.values().save()
+            self.show_message("บันทึกการตั้งค่านำเสนอแล้ว")
+
     def _front(self, dlg) -> None:
         dlg.show()
         dlg.raise_()

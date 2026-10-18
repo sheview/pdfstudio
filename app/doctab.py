@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from . import objects as objmod
 from . import ops, printing
 from . import exporters, imagetools
+from .presenter import PresentationWindow, PresentOptions
 from .qrtool import QrDialog
 from .imgdialogs import CropDialog, ExportOptionsDialog, RemoveBgDialog
 from .dialogs import ExportImageDialog, InsertPdfDialog, SplitDialog, TextDialog, WatermarkDialog
@@ -495,6 +496,27 @@ class DocTab(QWidget):
         c = self.view.visible_center(page)
         o = objmod.make_text(page, max(c.x() - 80, 0.0), c.y(), 160, text, self.win.text_style_copy())
         self.add_object(o)
+
+    def present(self, from_current: bool = False) -> None:
+        """นำเสนอเต็มจอ (วัตถุรูป/ข้อความที่วางไว้จะแสดงด้วย)"""
+        if getattr(self, "_presenter", None) is not None:
+            return
+        start = self.view.current_page if from_current else 0
+        with self.model.baked() as d:
+            data = d.tobytes(garbage=0, deflate=False, encryption=pymupdf.PDF_ENCRYPT_NONE)
+        win = self.window()
+        opts = PresentOptions.load()
+        screens = QApplication.screens()
+        screen = screens[opts.screen] if 0 <= opts.screen < len(screens) else (win.screen() if win is not None else None)
+        self._presenter = PresentationWindow(data, start, opts, screen)
+        self._presenter.closed_callbacks.append(self._presenter_closed)
+        self._presenter.start()
+
+    def _presenter_closed(self) -> None:
+        pw, self._presenter = getattr(self, "_presenter", None), None
+        win = self.window()
+        if win is not None:
+            win.activateWindow()
 
     def page_text(self) -> str:
         return self.model.doc[self.view.current_page].get_text()
